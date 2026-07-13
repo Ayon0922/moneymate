@@ -210,6 +210,31 @@
   <!-- BUDGET -->
   <section class="view" id="v-bud">
     <div class="card">
+      <h2>🎯 Savings Goal</h2>
+      <div class="split">
+        <div><label>Goal name</label><input id="gName" type="text" placeholder="e.g. Flight home"></div>
+        <div><label>Target ($)</label><input id="gTarget" type="number" inputmode="decimal" step="1" placeholder="0"></div>
+      </div>
+      <div class="split">
+        <div><label>By date (optional)</label><input id="gDate" type="date"></div>
+        <div><label>Saved so far ($)</label><input id="gSaved" type="number" inputmode="decimal" step="1" placeholder="0"></div>
+      </div>
+      <button class="btn" onclick="saveGoal()">Save Goal</button>
+      <div id="goalOut" style="margin-top:14px"></div>
+    </div>
+
+    <div class="card">
+      <h2>🧮 Budget Estimator</h2>
+      <div class="muted" style="font-size:13px;margin-bottom:4px">Enter your monthly money and savings target — it builds a budget from your real spending mix.</div>
+      <div class="split">
+        <div><label>Monthly money ($)</label><input id="beIncome" type="number" inputmode="decimal" step="1"></div>
+        <div><label>Save / month ($)</label><input id="beSave" type="number" inputmode="decimal" step="1"></div>
+      </div>
+      <button class="btn" onclick="estimateBudget()">Estimate Budget</button>
+      <div id="beOut" style="margin-top:14px"></div>
+    </div>
+
+    <div class="card">
       <h2>Monthly Budgets</h2>
       <div class="muted" style="font-size:13px;margin-bottom:6px">Set a monthly cap per category. Resets each month.</div>
       <div id="budgetList"></div>
@@ -369,7 +394,7 @@ const CATS=[
 ];
 const catMap=Object.fromEntries(CATS.map(c=>[c.id,c]));
 const DEFAULT={
-  txns:[], splits:[], stubs:[],
+  txns:[], splits:[], stubs:[], goal:{name:"",target:0,deadline:"",saved:0},
   budgets:{food:200,groceries:250,goingout:150,transport:80,bills:400,shopping:100,health:50,other:60},
   settings:{startBal:0,rate:16,freq:26,filing:"single",local:2.83,intl:true,fedStdElig:false,treaty:0}
 };
@@ -383,6 +408,7 @@ function load(){
     return {...structuredClone(DEFAULT),...d,
       settings:{...DEFAULT.settings,...(d.settings||{})},
       budgets:{...DEFAULT.budgets,...(d.budgets||{})},
+      goal:{...DEFAULT.goal,...(d.goal||{})},
       splits:d.splits||[], stubs:d.stubs||[]};
   }catch(e){return structuredClone(DEFAULT);}
 }
@@ -442,6 +468,12 @@ function suggestions(){
   // splits nudge
   const owed=splitTotals().owed;
   if(owed>bal*0.2&&owed>20) out.push(["warn",`People owe you <b>${money0(owed)}</b> — collecting it would ease this month. See the Splits tab.`]);
+  const g=DB.goal;
+  if(g&&g.target){
+    const need=goalNeededPerMonth();
+    if(need>0&&g.deadline) out.push(["good",`Savings goal${g.name?" “"+escapeHtml(g.name)+"”":""}: set aside <b>${money0(need)}/mo</b> to reach ${money0(g.target)} on time.`]);
+    else if(g.saved<g.target) out.push(["good",`Savings goal${g.name?" “"+escapeHtml(g.name)+"”":""}: ${money0(g.saved)} of ${money0(g.target)} saved. Add a target date in Budget to get a monthly plan.`]);
+  }
   return out;
 }
 
@@ -602,6 +634,75 @@ function renderStubs(){
   }).join("");
 }
 
+/* ===================== SAVINGS GOAL + BUDGET ESTIMATOR ===================== */
+function val(id){return document.getElementById(id).value.trim();}
+function avgMonthlyIncome(){
+  const cutoff=new Date(Date.now()-90*864e5).toISOString().slice(0,10);
+  const inc=DB.txns.filter(t=>t.type==="income"&&t.date>=cutoff).reduce((s,t)=>s+t.amount,0);
+  return inc/3;
+}
+function histShares(){
+  const n=new Date(),cut=new Date(n.getFullYear(),n.getMonth()-6,1).toISOString().slice(0,10);
+  const by={};let tot=0;
+  DB.txns.filter(t=>t.type==="expense"&&t.date>=cut).forEach(t=>{by[t.cat]=(by[t.cat]||0)+t.amount;tot+=t.amount;});
+  const sh={};CATS.forEach(c=>sh[c.id]=tot>0?(by[c.id]||0)/tot:1/CATS.length);
+  return sh;
+}
+function goalMonthsLeft(){
+  const g=DB.goal;if(!g||!g.deadline)return null;
+  const n=new Date(),d=new Date(g.deadline+"T00:00");
+  return Math.max(1,(d.getFullYear()-n.getFullYear())*12+(d.getMonth()-n.getMonth()));
+}
+function goalNeededPerMonth(){
+  const g=DB.goal;if(!g||!g.target)return 0;const m=goalMonthsLeft();
+  return m?Math.max(0,(g.target-g.saved)/m):0;
+}
+function saveGoal(){
+  DB.goal={name:val("gName"),target:+num("gTarget"),deadline:val("gDate"),saved:+num("gSaved")};
+  save();renderGoal();renderBudgetExtras();renderDash();toast("Goal saved");
+}
+function renderGoal(){
+  const g=DB.goal,el=document.getElementById("goalOut");if(!el)return;
+  if(!g||!g.target){el.innerHTML="";return;}
+  const pct=Math.min(100,g.saved/g.target*100);
+  const bc=pct>=100?"var(--good)":"var(--accent)";
+  let msg=`<div class="bar"><span style="width:${pct}%;background:${bc}"></span></div>
+    <div class="hint">${money0(g.saved)} of ${money0(g.target)} saved (${pct.toFixed(0)}%)`;
+  const need=goalNeededPerMonth(),m=goalMonthsLeft();
+  if(m&&need>0){const d=new Date(g.deadline+"T00:00");
+    msg+=` — save <b>${money0(need)}/mo</b> for ${m} month${m>1?"s":""} to reach it by ${d.toLocaleDateString("en-US",{month:"short",year:"numeric"})}.`;}
+  else if(pct>=100){msg+=` — 🎉 goal reached!`;}
+  el.innerHTML=msg+`</div>`;
+}
+let _SUG=null;
+function estimateBudget(){
+  const income=+num("beIncome"),saveAmt=+num("beSave"),out=document.getElementById("beOut");
+  const spendable=income-saveAmt;
+  if(income<=0){out.innerHTML=`<div class="advice warn">Enter your monthly money first.</div>`;return;}
+  if(spendable<=0){out.innerHTML=`<div class="advice bad">Saving ${money0(saveAmt)} from ${money0(income)} leaves nothing to spend. Lower the savings amount.</div>`;return;}
+  const sh=histShares();_SUG={};
+  CATS.forEach(c=>_SUG[c.id]=Math.max(0,Math.round(spendable*sh[c.id])));
+  const rows=CATS.map(c=>`<div class="catbar"><div class="r1"><span>${c.icon} ${c.name}</span><span>${money0(_SUG[c.id])}</span></div>
+    <div class="track"><div class="fill" style="width:${sh[c.id]*100}%;background:${c.color}"></div></div></div>`).join("");
+  const rate=income>0?(saveAmt/income*100):0;
+  out.innerHTML=`<div class="hint">${money0(income)} − ${money0(saveAmt)} saved = <b>${money0(spendable)}</b> to spend (${rate.toFixed(0)}% savings rate), split by your real habits:</div>
+    ${rows}
+    <button class="btn" onclick="applySuggested()">Apply these budgets</button>`;
+}
+function applySuggested(){if(_SUG){DB.budgets={...DB.budgets,..._SUG};save();renderBudget();toast("Budgets updated ✓");}}
+function renderBudgetExtras(){
+  const g=DB.goal;
+  document.getElementById("gName").value=g.name||"";
+  document.getElementById("gTarget").value=g.target||"";
+  document.getElementById("gDate").value=g.deadline||"";
+  document.getElementById("gSaved").value=g.saved||"";
+  const bi=document.getElementById("beIncome");
+  if(!bi.value)bi.value=Math.round(avgMonthlyIncome())||"";
+  const bs=document.getElementById("beSave");
+  if(!bs.value&&goalNeededPerMonth())bs.value=Math.round(goalNeededPerMonth());
+  renderGoal();
+}
+
 /* ===================== RENDER: dash/exp/budget ===================== */
 function renderDash(){
   document.getElementById("balAmt").textContent=money(balance());
@@ -750,7 +851,7 @@ function go(v){
   document.querySelectorAll(".view").forEach(s=>s.classList.remove("active"));
   document.getElementById("v-"+v).classList.add("active");
   document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("active",b.dataset.v===v));
-  if(v==="dash")renderDash();if(v==="exp")renderExpenses();if(v==="bud")renderBudget();
+  if(v==="dash")renderDash();if(v==="exp")renderExpenses();if(v==="bud"){renderBudget();renderBudgetExtras();}
   if(v==="ana")renderAnalytics();if(v==="spl")renderSplits();if(v==="pay")renderStubs();
   window.scrollTo(0,0);
 }
