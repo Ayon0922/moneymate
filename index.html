@@ -185,6 +185,10 @@
 
   <!-- ANALYTICS -->
   <section class="view" id="v-ana">
+    <div class="card">
+      <h2>📅 This Month at a Glance</h2>
+      <div id="monthSummary"></div>
+    </div>
     <div class="row" style="margin-bottom:14px">
       <div class="mini"><div class="k">Avg / month</div><div class="v" id="aAvgMonth">$0</div></div>
       <div class="mini"><div class="k">Avg / day (mo)</div><div class="v" id="aAvgDay">$0</div></div>
@@ -496,7 +500,26 @@ function monthlyTotals(n){
   }
   return arr;
 }
+function renderMonthSummary(){
+  const el=document.getElementById("monthSummary");if(!el)return;
+  const spent=spentThisMonth();
+  const inc=DB.txns.filter(t=>t.type==="income"&&inThisMonth(t.date)).reduce((s,t)=>s+t.amount,0);
+  const net=inc-spent;
+  const mm=monthlyTotals(2),prev=mm[0].total,cur=mm[1].total;
+  let top=null;for(const c of SPEND_CATS){const sp=spentThisMonth(c.id);if(!top||sp>top.sp)top={c,sp};}
+  const subs=detectRecurring().reduce((s,x)=>s+x.monthly,0);
+  const overs=SPEND_CATS.filter(c=>{const cap=+DB.budgets[c.id]||0;return cap&&spentThisMonth(c.id)>cap;}).length;
+  const momTxt=prev>0?`${cur>=prev?"up":"down"} ${Math.abs((cur-prev)/prev*100).toFixed(0)}% vs last month`:"";
+  el.innerHTML=`
+    <div class="row" style="margin-bottom:10px">
+      <div class="mini"><div class="k">Spent</div><div class="v bad">${money0(spent)}</div></div>
+      <div class="mini"><div class="k">Income</div><div class="v good">${money0(inc)}</div></div>
+      <div class="mini"><div class="k">Net</div><div class="v ${net>=0?"good":"bad"}">${net>=0?"+":""}${money0(net)}</div></div>
+    </div>
+    <div class="advice ${net>=0?"good":"warn"}">${net>=0?`Net positive by <b>${money0(net)}</b> this month.`:`Spending exceeds income by <b>${money0(-net)}</b> this month.`}${top&&top.sp>0?` Top: ${top.c.icon} ${top.c.name} (${money0(top.sp)}).`:""}${momTxt?` Spending ${momTxt}.`:""} ${overs?`${overs} categor${overs>1?"ies":"y"} over budget.`:"Budgets on track."} ~${money0(subs)}/mo in subscriptions.</div>`;
+}
 function renderAnalytics(){
+  renderMonthSummary();
   const months=monthlyTotals(6);
   const spentMonths=months.filter(m=>m.total>0);
   const allTime=DB.txns.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
