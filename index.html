@@ -205,6 +205,10 @@
       <h2>Income vs Expense (this month)</h2>
       <div id="ivsE"></div>
     </div>
+    <div class="card">
+      <h2>🔁 Recurring & Subscriptions</h2>
+      <div id="subsOut"></div>
+    </div>
   </section>
 
   <!-- BUDGET -->
@@ -470,6 +474,8 @@ function suggestions(){
   // splits nudge
   const owed=splitTotals().owed;
   if(owed>bal*0.2&&owed>20) out.push(["warn",`People owe you <b>${money0(owed)}</b> — collecting it would ease this month. See the Splits tab.`]);
+  const soonSubs=detectRecurring().filter(x=>{if(!x.next)return false;const d=Math.round((new Date(x.next)-new Date(todayStr()))/864e5);return d>=0&&d<=3;});
+  if(soonSubs.length) out.push(["warn",`Upcoming charge${soonSubs.length>1?"s":""} in the next few days: ${soonSubs.slice(0,3).map(x=>escapeHtml(x.name.split(" ").slice(0,2).join(" "))+" ~"+money0(x.monthly)).join(", ")}.`]);
   const g=DB.goal;
   if(g&&g.target){
     const need=goalNeededPerMonth();
@@ -526,6 +532,66 @@ function renderAnalytics(){
     <div class="catbar"><div class="r1"><span>🧾 Expenses</span><span>${money0(thisMo)}</span></div>
       <div class="track"><div class="fill" style="width:${thisMo/m2*100}%;background:var(--bad)"></div></div></div>
     <div class="hint">${inc>=thisMo?`Net positive: +${money0(inc-thisMo)} this month.`:`Spending exceeds income by ${money0(thisMo-inc)} this month.`}</div>`;
+  renderSubs();
+}
+
+/* ===================== RECURRING / SUBSCRIPTIONS ===================== */
+const SUB_KW=/APPLE\.COM|MEMBERSHIP|SPOTIFY|NETFLIX|ADOBE|GRAMMARLY|ICLOUD|HULU|DISNEY\+|PRIME VIDEO|CHATGPT|OPENAI|CLAUDE|ANTHROPIC|UBER ?ONE|AMAZON LUNA|PATREON|YOUTUBE PREMIUM|CURSOR|XBOX|PLAYSTATION|NINTENDO/i;
+function _mkey(note){return (note||"").toUpperCase().replace(/[^A-Z]/g,"").slice(0,14);}
+function _gapStats(arr){
+  arr.sort((a,b)=>a.date.localeCompare(b.date));
+  const g=[];for(let i=1;i<arr.length;i++)g.push((new Date(arr[i].date)-new Date(arr[i-1].date))/864e5);
+  if(!g.length)return {mean:0,sd:0};
+  const mean=g.reduce((a,b)=>a+b,0)/g.length,sd=Math.sqrt(g.reduce((a,b)=>a+(b-mean)**2,0)/g.length);
+  return {mean,sd};
+}
+function detectRecurring(){
+  const cut=new Date(Date.now()-180*864e5).toISOString().slice(0,10);
+  const byMerch={},byMA={};
+  DB.txns.filter(t=>t.type==="expense"&&t.cat!=="transfer"&&t.note).forEach(t=>{
+    const mk=_mkey(t.note);if(mk.length<3)return;
+    (byMerch[mk]=byMerch[mk]||[]).push(t);
+    (byMA[mk+"|"+Math.round(t.amount)]=byMA[mk+"|"+Math.round(t.amount)]||[]).push(t);
+  });
+  const subs=[],seen=new Set();
+  // known subscription brands: bill irregularly, so use monthly average over last 6mo
+  Object.values(byMerch).forEach(arr=>{
+    if(!SUB_KW.test(arr[0].note))return;
+    const recent=arr.filter(t=>t.date>=cut);
+    if(new Set(recent.map(t=>t.date.slice(0,7))).size<3)return;
+    const monthly=recent.reduce((s,t)=>s+t.amount,0)/6;
+    const {mean,sd}=_gapStats(arr),last=arr[arr.length-1],reliable=sd<10&&mean>=25&&mean<=40;
+    subs.push({name:last.note,cat:last.cat,monthly,count:recent.length,last:last.date,
+      next:reliable?new Date(new Date(last.date).getTime()+mean*864e5).toISOString().slice(0,10):null});
+    seen.add(_mkey(arr[0].note));
+  });
+  // unknown but strictly regular monthly fixed charge
+  Object.values(byMA).forEach(arr=>{
+    const mk=_mkey(arr[0].note);if(seen.has(mk)||arr.length<3)return;
+    if(new Set(arr.map(t=>t.date.slice(0,7))).size<3)return;
+    const {mean,sd}=_gapStats(arr);if(!(mean>=26&&mean<=35&&sd<6))return;
+    const amts=arr.map(t=>t.amount).sort((a,b)=>a-b),med=amts[Math.floor(amts.length/2)],last=arr[arr.length-1];
+    subs.push({name:last.note,cat:last.cat,monthly:med*(30/mean),count:arr.length,last:last.date,
+      next:new Date(new Date(last.date).getTime()+mean*864e5).toISOString().slice(0,10)});
+  });
+  return subs.sort((a,b)=>b.monthly-a.monthly);
+}
+function renderSubs(){
+  const el=document.getElementById("subsOut");if(!el)return;
+  const subs=detectRecurring();
+  if(!subs.length){el.innerHTML=`<div class="empty">No recurring subscriptions detected yet. Fixed monthly charges appear here after a few months of data.</div>`;return;}
+  const monthly=subs.reduce((s,x)=>s+x.monthly,0),today=todayStr();
+  const rows=subs.map(x=>{
+    let tag;
+    if(x.next){const dd=Math.round((new Date(x.next)-new Date(today))/864e5);
+      tag=(dd<=7&&dd>=-3)?`<span class="tag warn">due ${dd<=0?"now":"in "+dd+"d"}</span>`:`next ~${fmtDate(x.next)}`;}
+    else tag=`last ${fmtDate(x.last)}`;
+    const c=catMap[x.cat]||catMap.other;
+    return `<div class="txn"><div class="ic">${c.icon}</div>
+      <div class="info"><div class="t">${escapeHtml(x.name)}</div><div class="s">${x.count} charge${x.count>1?"s":""}/6mo · ${tag}</div></div>
+      <div class="amt">${money(x.monthly)}<span class="muted" style="font-size:10px">/mo</span></div></div>`;
+  }).join("");
+  el.innerHTML=`<div class="hint">Estimated <b>${money0(monthly)}/month</b> on subscriptions — cancel any you're not using.</div>${rows}`;
 }
 
 /* ===================== SPLITS ===================== */
