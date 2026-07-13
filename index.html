@@ -391,8 +391,10 @@ const CATS=[
   {id:"shopping",icon:"🛍️",name:"Shopping",disc:true,color:"#fbbf24"},
   {id:"health",icon:"💊",name:"Health",disc:false,color:"#22d3ee"},
   {id:"other",icon:"✨",name:"Other",disc:true,color:"#94a3b8"},
+  {id:"transfer",icon:"🔄",name:"Cash/Transfer",disc:false,color:"#64748b"},
 ];
 const catMap=Object.fromEntries(CATS.map(c=>[c.id,c]));
+const SPEND_CATS=CATS.filter(c=>c.id!=="transfer"); // categories that count as real spending
 const DEFAULT={
   txns:[], splits:[], stubs:[], goal:{name:"",target:0,deadline:"",saved:0},
   budgets:{food:200,groceries:250,goingout:150,transport:80,bills:400,shopping:100,health:50,other:60},
@@ -423,7 +425,7 @@ function daysLeftInMonth(){const n=new Date();return new Date(n.getFullYear(),n.
 function dayOfMonth(){return new Date().getDate();}
 
 function balance(){return DB.settings.startBal+DB.txns.reduce((s,t)=>s+(t.type==="income"?t.amount:-t.amount),0);}
-function spentThisMonth(cat){return DB.txns.filter(t=>t.type==="expense"&&inThisMonth(t.date)&&(!cat||t.cat===cat)).reduce((s,t)=>s+t.amount,0);}
+function spentThisMonth(cat){return DB.txns.filter(t=>t.type==="expense"&&inThisMonth(t.date)&&(cat?t.cat===cat:t.cat!=="transfer")).reduce((s,t)=>s+t.amount,0);}
 function totalBudget(){return Object.values(DB.budgets).reduce((a,b)=>a+(+b||0),0);}
 
 /* ===================== PAYCHECK (MD + international) ===================== */
@@ -483,7 +485,7 @@ function monthlyTotals(n){
   for(let i=n-1;i>=0;i--){
     const d=new Date(now.getFullYear(),now.getMonth()-i,1);
     const key=d.toISOString().slice(0,7);
-    const total=DB.txns.filter(t=>t.type==="expense"&&monthKey(t.date)===key).reduce((s,t)=>s+t.amount,0);
+    const total=DB.txns.filter(t=>t.type==="expense"&&t.cat!=="transfer"&&monthKey(t.date)===key).reduce((s,t)=>s+t.amount,0);
     arr.push({key,label:d.toLocaleDateString("en-US",{month:"short"}),total});
   }
   return arr;
@@ -501,7 +503,7 @@ function renderAnalytics(){
   if(prev>0){const pct=(cur-prev)/prev*100;mom.textContent=(pct>=0?"+":"")+pct.toFixed(0)+"%";mom.className="v "+(pct>0?"bad":"good");}
   else{mom.textContent="—";mom.className="v";}
   // top category this month
-  let top=null;for(const c of CATS){const sp=spentThisMonth(c.id);if(!top||sp>top.sp)top={c,sp};}
+  let top=null;for(const c of SPEND_CATS){const sp=spentThisMonth(c.id);if(!top||sp>top.sp)top={c,sp};}
   document.getElementById("aTop").textContent=top&&top.sp>0?`${top.c.icon} ${top.c.name}`:"—";
   // trend
   const max=Math.max(1,...months.map(m=>m.total));
@@ -509,7 +511,7 @@ function renderAnalytics(){
     <div class="col"><div class="vl">${m.total>0?money0(m.total):""}</div>
     <div class="bx" style="height:${m.total/max*100}%"></div><div class="lb">${m.label}</div></div>`).join("");
   // category breakdown this month
-  const rows=CATS.map(c=>({c,sp:spentThisMonth(c.id)})).filter(x=>x.sp>0).sort((a,b)=>b.sp-a.sp);
+  const rows=SPEND_CATS.map(c=>({c,sp:spentThisMonth(c.id)})).filter(x=>x.sp>0).sort((a,b)=>b.sp-a.sp);
   const tot=rows.reduce((s,x)=>s+x.sp,0);
   document.getElementById("catBreak").innerHTML=rows.length?rows.map(x=>`
     <div class="catbar"><div class="r1"><span>${x.c.icon} ${x.c.name}</span><span>${money0(x.sp)} · ${(x.sp/tot*100).toFixed(0)}%</span></div>
@@ -644,8 +646,8 @@ function avgMonthlyIncome(){
 function histShares(){
   const n=new Date(),cut=new Date(n.getFullYear(),n.getMonth()-6,1).toISOString().slice(0,10);
   const by={};let tot=0;
-  DB.txns.filter(t=>t.type==="expense"&&t.date>=cut).forEach(t=>{by[t.cat]=(by[t.cat]||0)+t.amount;tot+=t.amount;});
-  const sh={};CATS.forEach(c=>sh[c.id]=tot>0?(by[c.id]||0)/tot:1/CATS.length);
+  DB.txns.filter(t=>t.type==="expense"&&t.cat!=="transfer"&&t.date>=cut).forEach(t=>{by[t.cat]=(by[t.cat]||0)+t.amount;tot+=t.amount;});
+  const sh={};SPEND_CATS.forEach(c=>sh[c.id]=tot>0?(by[c.id]||0)/tot:1/SPEND_CATS.length);
   return sh;
 }
 function goalMonthsLeft(){
@@ -681,12 +683,14 @@ function estimateBudget(){
   if(income<=0){out.innerHTML=`<div class="advice warn">Enter your monthly money first.</div>`;return;}
   if(spendable<=0){out.innerHTML=`<div class="advice bad">Saving ${money0(saveAmt)} from ${money0(income)} leaves nothing to spend. Lower the savings amount.</div>`;return;}
   const sh=histShares();_SUG={};
-  CATS.forEach(c=>_SUG[c.id]=Math.max(0,Math.round(spendable*sh[c.id])));
-  const rows=CATS.map(c=>`<div class="catbar"><div class="r1"><span>${c.icon} ${c.name}</span><span>${money0(_SUG[c.id])}</span></div>
+  SPEND_CATS.forEach(c=>_SUG[c.id]=Math.max(0,Math.round(spendable*sh[c.id])));
+  const rows=SPEND_CATS.map(c=>`<div class="catbar"><div class="r1"><span>${c.icon} ${c.name}</span><span>${money0(_SUG[c.id])}</span></div>
     <div class="track"><div class="fill" style="width:${sh[c.id]*100}%;background:${c.color}"></div></div></div>`).join("");
   const rate=income>0?(saveAmt/income*100):0;
+  const bal=balance();
+  const proj=saveAmt>0?`<div class="advice good" style="margin-top:10px">Building on your current balance of <b>${money0(bal)}</b>, this plan adds ~${money0(saveAmt)}/mo: next month ≈ <b>${money0(bal+saveAmt)}</b>, in 3 months ≈ <b>${money0(bal+3*saveAmt)}</b>, in 6 months ≈ <b>${money0(bal+6*saveAmt)}</b>.</div>`:"";
   out.innerHTML=`<div class="hint">${money0(income)} − ${money0(saveAmt)} saved = <b>${money0(spendable)}</b> to spend (${rate.toFixed(0)}% savings rate), split by your real habits:</div>
-    ${rows}
+    ${rows}${proj}
     <button class="btn" onclick="applySuggested()">Apply these budgets</button>`;
 }
 function applySuggested(){if(_SUG){DB.budgets={...DB.budgets,..._SUG};save();renderBudget();toast("Budgets updated ✓");}}
@@ -732,7 +736,7 @@ function renderExpenses(){
   document.getElementById("txnList").innerHTML=total?shown.map(txnRow).join("")+(total>250?`<div class="hint" style="text-align:center;margin-top:10px">Showing 250 of ${total}. Use category filters to narrow down.</div>`:""):`<div class="empty">Nothing here yet.</div>`;
 }
 function renderBudget(){
-  document.getElementById("budgetList").innerHTML=CATS.map(c=>{
+  document.getElementById("budgetList").innerHTML=SPEND_CATS.map(c=>{
     const cap=+DB.budgets[c.id]||0,sp=spentThisMonth(c.id),pct=cap>0?Math.min(100,sp/cap*100):0;
     const st=sp>cap?"over":pct>80?"warn":"ok",tag=sp>cap?`Over ${money0(sp-cap)}`:pct>80?"Almost":"OK";
     const bc=st==="over"?"var(--bad)":st==="warn"?"var(--warn)":"var(--good)";
@@ -868,7 +872,14 @@ function syncSettingsUI(){
   document.getElementById("pRate").value=s.rate;
   document.getElementById("payMode").textContent=s.intl?"Maryland (Baltimore County) · nonresident F-1 — FICA exempt":"Maryland (Baltimore County) · resident";
 }
+function migrate(){
+  if(DB._mig_transfer)return;
+  const rx=/(atm|zelle payment to|cash withdraw|withdrawal|venmo to|cash app)/i;
+  DB.txns.forEach(t=>{if(t.type==="expense"&&t.cat==="other"&&rx.test(t.note||""))t.cat="transfer";});
+  DB._mig_transfer=true;save();
+}
 function initUI(){
+  migrate();
   document.getElementById("eCat").innerHTML=CATS.map(c=>`<option value="${c.id}">${c.icon} ${c.name}</option>`).join("");
   document.getElementById("eDate").value=todayStr();
   document.getElementById("stDate").value=todayStr();
