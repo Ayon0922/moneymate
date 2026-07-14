@@ -958,6 +958,7 @@ function go(v){
   document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("active",b.dataset.v===v));
   if(v==="dash")renderDash();if(v==="exp")renderExpenses();if(v==="bud"){renderBudget();renderBudgetExtras();}
   if(v==="ana")renderAnalytics();if(v==="spl")renderSplits();if(v==="pay")renderStubs();
+  if(v==="set")syncSettingsUI();
   window.scrollTo(0,0);
 }
 function syncSettingsUI(){
