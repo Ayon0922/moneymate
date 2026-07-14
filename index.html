@@ -6,7 +6,17 @@
 <meta name="theme-color" content="#0f172a">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>MoneyMate — Expense Manager</title>
+<title>MoneyMate — Personal Finance App</title>
+<meta name="description" content="A mobile-first personal finance app in a single HTML file — expense tracking, budgeting, savings goals, analytics, and a Maryland paycheck calculator. Built with vanilla JS + a Python data pipeline." />
+<meta property="og:type" content="website" />
+<meta property="og:title" content="MoneyMate — Personal Finance App" />
+<meta property="og:description" content="Expense tracking, budgeting, savings goals, analytics, and a Maryland paycheck calculator — in one dependency-free HTML file. Built with vanilla JS + a Python data pipeline over ~1,500 real transactions." />
+<meta property="og:url" content="https://ayon0922.github.io/moneymate/" />
+<meta property="og:image" content="https://ayon0922.github.io/moneymate/preview.png" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="MoneyMate — Personal Finance App" />
+<meta name="twitter:description" content="Expense tracking, budgeting, savings goals, analytics, and a Maryland paycheck calculator in one HTML file." />
+<meta name="twitter:image" content="https://ayon0922.github.io/moneymate/preview.png" />
 <style>
   :root{
     --bg:#0f172a; --bg2:#1e293b; --card:#1e293b; --card2:#273449;
@@ -341,7 +351,8 @@
   <section class="view" id="v-set">
     <div class="card">
       <h2>Profile & Pay</h2>
-      <label>Starting balance ($)</label><input id="sBal" type="number" inputmode="decimal" step="0.01">
+      <label>Current balance ($)</label><input id="sBal" type="number" inputmode="decimal" step="0.01">
+      <div class="hint">Set this to match your bank balance now — adding income/expenses adjusts it from here.</div>
       <label>Hourly rate ($)</label><input id="sRate" type="number" inputmode="decimal" step="0.01">
       <label>Pay frequency</label>
       <select id="sFreq"><option value="52">Weekly</option><option value="26">Biweekly</option><option value="24">Semi-monthly</option><option value="12">Monthly</option></select>
@@ -917,7 +928,8 @@ function addPayToBalance(net){DB.txns.push({id:Date.now(),type:"income",amount:+
   save();renderDash();renderExpenses();toast("Paycheck added");go("dash");}
 function saveSettings(){
   const s=DB.settings;
-  s.startBal=parseFloat(document.getElementById("sBal").value)||0;
+  const desiredBal=parseFloat(document.getElementById("sBal").value);
+  if(!isNaN(desiredBal)) s.startBal+=(desiredBal-balance()); // field is the CURRENT balance; back-solve the anchor
   s.rate=parseFloat(document.getElementById("sRate").value)||16;
   s.freq=document.getElementById("sFreq").value;
   s.filing=document.getElementById("sFile").value;
@@ -950,7 +962,7 @@ function go(v){
 }
 function syncSettingsUI(){
   const s=DB.settings;
-  document.getElementById("sBal").value=s.startBal;
+  document.getElementById("sBal").value=Math.round(balance()*100)/100;
   document.getElementById("sRate").value=s.rate;
   document.getElementById("sFreq").value=s.freq;
   document.getElementById("sFile").value=s.filing;
