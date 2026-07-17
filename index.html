@@ -740,8 +740,15 @@ function renderStubs(){
     return `<div class="bud"><div class="top"><span><b>${fmtDate(s.date)}</b> · gross ${money0(s.gross)}${s.hours?" · "+s.hours+"h":""}</span>
       <button class="del" onclick="delStub(${s.id})">×</button></div>
       <div class="muted" style="font-size:13px;margin-top:2px">Actual net ${money(actNet)} · est ${money(est.net)} ·
-        <span style="color:${col};font-weight:700">${d>=0?"+":""}${money(d)}</span></div></div>`;
+        <span style="color:${col};font-weight:700">${d>=0?"+":""}${money(d)}</span></div>
+      <button class="btn ghost sm" style="margin-top:8px" onclick="toggleStubDetail(${s.id})">View details</button>
+      <div id="sd-${s.id}" style="margin-top:10px"></div></div>`;
   }).join("");
+}
+function toggleStubDetail(id){
+  const el=document.getElementById("sd-"+id),stub=DB.stubs.find(s=>s.id===id);
+  if(!el||!stub)return;
+  el.innerHTML=el.innerHTML?"":compareHtml(stub);
 }
 
 /* ===================== SAVINGS GOAL + BUDGET ESTIMATOR ===================== */
@@ -935,7 +942,10 @@ function calcPay(){
 }
 /* ===================== PAYCHECK LEDGER (on hold -> deposit) ===================== */
 function savePaycheck(gross,net,hours,date){
-  DB.paychecks.push({id:Date.now(),date:date||todayStr(),gross:+gross||0,net:+net||0,hours:+hours||0,status:"pending"});
+  const d=date||todayStr(),nn=Math.round((+net||0)*100)/100;
+  const dup=DB.paychecks.find(p=>p.date===d&&Math.round(p.net*100)/100===nn);
+  if(dup&&!confirm("You already have a paycheck saved for "+fmtDate(d)+" at "+money(nn)+". Add another anyway?"))return;
+  DB.paychecks.push({id:Date.now(),date:d,gross:+gross||0,net:nn,hours:+hours||0,status:"pending"});
   save();renderPaychecks();toast("Paycheck saved — on hold");
 }
 function depositPaycheck(id){
