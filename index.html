@@ -316,6 +316,13 @@
     </div>
 
     <div class="card">
+      <h2>💵 Paychecks</h2>
+      <div class="muted" style="font-size:13px;margin-bottom:8px">Saved paychecks stay <b>on hold</b> (not in your balance). When the check actually lands in your bank, tap <b>Deposit</b> to add it.</div>
+      <div id="paySummary"></div>
+      <div id="payList"></div>
+    </div>
+
+    <div class="card">
       <h2>Reconcile Actual Pay Stub</h2>
       <div class="muted" style="font-size:13px;margin-bottom:4px">Type the numbers from your real stub — it compares them to the estimate and flags any gap.</div>
       <div class="split">
@@ -415,7 +422,7 @@ const CATS=[
 const catMap=Object.fromEntries(CATS.map(c=>[c.id,c]));
 const SPEND_CATS=CATS.filter(c=>c.id!=="transfer"); // categories that count as real spending
 const DEFAULT={
-  txns:[], splits:[], stubs:[], goal:{name:"",target:0,deadline:"",saved:0},
+  txns:[], splits:[], stubs:[], paychecks:[], goal:{name:"",target:0,deadline:"",saved:0},
   budgets:{food:200,groceries:250,goingout:150,transport:80,bills:400,shopping:100,health:50,other:60},
   settings:{startBal:0,rate:16,freq:26,filing:"single",local:2.83,intl:true,fedStdElig:false,treaty:0}
 };
@@ -430,7 +437,7 @@ function load(){
       settings:{...DEFAULT.settings,...(d.settings||{})},
       budgets:{...DEFAULT.budgets,...(d.budgets||{})},
       goal:{...DEFAULT.goal,...(d.goal||{})},
-      splits:d.splits||[], stubs:d.stubs||[]};
+      splits:d.splits||[], stubs:d.stubs||[], paychecks:d.paychecks||[]};
   }catch(e){return structuredClone(DEFAULT);}
 }
 function save(){localStorage.setItem("moneymate",JSON.stringify(DB));}
@@ -714,7 +721,8 @@ function compareHtml(stub){
     ${row("Medicare",e.med,a.med)}
     ${a.other>0?`<div class="cmp"><span>Other ded.</span><span>—</span><span>${money(a.other)}</span><span></span></div>`:""}
     <div class="cmp total"><span>Net pay</span><span>${money(e.net)}</span><span>${money(actualNet)}</span><span class="${Math.abs(netDiff)<0.5?"":(netDiff<0?"negx":"pos")}">${netDiff>=0?"+":""}${money(netDiff)}</span></div>
-    ${flags}`;
+    ${flags}
+    <button class="btn ghost" style="margin-top:10px" onclick="savePaycheck(${stub.gross.toFixed(2)},${actualNet.toFixed(2)},${(+stub.hours||0)},'${stub.date}')">Save this paycheck (on hold)</button>`;
 }
 function renderStubs(){
   const list=DB.stubs.slice().sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id);
@@ -852,7 +860,7 @@ function renderBudget(){
   bar.style.width=pct+"%";bar.style.background=sp>tb?"var(--bad)":pct>80?"var(--warn)":"var(--good)";
   document.getElementById("bMsg").textContent=sp>tb?`You're ${money0(sp-tb)} over your total monthly budget.`:`${money0(tb-sp)} of budget remaining this month.`;
 }
-function renderPay(p){
+function renderPay(p,hours){
   const mode=document.getElementById("payMode");
   mode.textContent=DB.settings.intl?"Maryland (Baltimore County) · nonresident F-1 — FICA exempt":"Maryland (Baltimore County) · resident";
   if(!p){document.getElementById("payOut").innerHTML="";return;}
@@ -869,7 +877,8 @@ function renderPay(p){
     <div class="grand"><span>Net take-home</span><span class="g">${money(p.net)}</span></div>
     <div class="hint">Effective tax ${(p.effRate*100).toFixed(1)}% · annualized gross ${money0(p.ag)}.
       ${DB.settings.intl?"Nonresident: no federal standard deduction unless a treaty applies. ":""}Planning estimate — real check depends on your MW507/W-4.</div>
-    <button class="btn ghost" onclick="addPayToBalance(${p.net.toFixed(2)})">Add ${money(p.net)} to balance</button>`;
+    <button class="btn" onclick="savePaycheck(${p.gross.toFixed(2)},${p.net.toFixed(2)},${(+hours||0)},'')">Save paycheck (on hold)</button>
+    <div class="hint" style="text-align:center;margin-top:6px">Saves to your Paychecks list without touching your balance yet.</div>`;
 }
 
 /* ===================== MERCHANT MEMORY ===================== */
@@ -922,10 +931,52 @@ function calcPay(){
   const h=parseFloat(document.getElementById("pHours").value)||0,ot=parseFloat(document.getElementById("pOt").value)||0;
   const rate=parseFloat(document.getElementById("pRate").value)||DB.settings.rate;
   if(h+ot<=0)return toast("Enter hours worked");
-  renderPay(computePay(h,ot,rate));
+  renderPay(computePay(h,ot,rate),h+ot);
 }
-function addPayToBalance(net){DB.txns.push({id:Date.now(),type:"income",amount:+net,cat:"other",note:"Paycheck",date:todayStr()});
-  save();renderDash();renderExpenses();toast("Paycheck added");go("dash");}
+/* ===================== PAYCHECK LEDGER (on hold -> deposit) ===================== */
+function savePaycheck(gross,net,hours,date){
+  DB.paychecks.push({id:Date.now(),date:date||todayStr(),gross:+gross||0,net:+net||0,hours:+hours||0,status:"pending"});
+  save();renderPaychecks();toast("Paycheck saved — on hold");
+}
+function depositPaycheck(id){
+  const p=DB.paychecks.find(x=>x.id===id);if(!p||p.status==="deposited")return;
+  const tid=Date.now();
+  DB.txns.push({id:tid,type:"income",amount:p.net,cat:"other",note:"Paycheck",date:todayStr()});
+  p.status="deposited";p.depositedDate=todayStr();p.txnId=tid;
+  save();renderPaychecks();renderDash();renderExpenses();toast("Added to balance ✓");
+}
+function undoPaycheck(id){
+  const p=DB.paychecks.find(x=>x.id===id);if(!p||p.status!=="deposited")return;
+  if(p.txnId)DB.txns=DB.txns.filter(t=>t.id!==p.txnId);
+  p.status="pending";delete p.depositedDate;delete p.txnId;
+  save();renderPaychecks();renderDash();renderExpenses();toast("Moved back to on hold");
+}
+function delPaycheck(id){
+  const p=DB.paychecks.find(x=>x.id===id);
+  if(p&&p.status==="deposited"&&p.txnId)DB.txns=DB.txns.filter(t=>t.id!==p.txnId);
+  DB.paychecks=DB.paychecks.filter(x=>x.id!==id);
+  save();renderPaychecks();renderDash();renderExpenses();
+}
+function renderPaychecks(){
+  const el=document.getElementById("payList");if(!el)return;
+  const list=DB.paychecks.slice().sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id);
+  const pending=list.filter(p=>p.status==="pending").reduce((s,p)=>s+p.net,0);
+  const got=list.filter(p=>p.status==="deposited").reduce((s,p)=>s+p.net,0);
+  document.getElementById("paySummary").innerHTML=`<div class="row" style="margin-bottom:12px">
+    <div class="mini"><div class="k">On hold</div><div class="v warn">${money0(pending)}</div></div>
+    <div class="mini"><div class="k">Deposited</div><div class="v good">${money0(got)}</div></div></div>`;
+  el.innerHTML=list.length?list.map(p=>{
+    const done=p.status==="deposited";
+    return `<div class="txn">
+      <div class="ic">${done?"✅":"⏳"}</div>
+      <div class="info"><div class="t">${money(p.net)}${p.hours?" · "+p.hours+"h":""}</div>
+        <div class="s">${fmtDate(p.date)} · ${done?"deposited "+fmtDate(p.depositedDate):"on hold"}</div></div>
+      ${done?`<button class="btn ghost sm" onclick="undoPaycheck(${p.id})">Undo</button>`
+            :`<button class="btn sm" onclick="depositPaycheck(${p.id})">Deposit</button>`}
+      <button class="del" onclick="delPaycheck(${p.id})">×</button>
+    </div>`;
+  }).join(""):`<div class="empty">No paychecks yet. Calculate one above and save it on hold, or save an actual stub from Reconcile.</div>`;
+}
 function saveSettings(){
   const s=DB.settings;
   const desiredBal=parseFloat(document.getElementById("sBal").value);
@@ -957,7 +1008,7 @@ function go(v){
   document.getElementById("v-"+v).classList.add("active");
   document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("active",b.dataset.v===v));
   if(v==="dash")renderDash();if(v==="exp")renderExpenses();if(v==="bud"){renderBudget();renderBudgetExtras();}
-  if(v==="ana")renderAnalytics();if(v==="spl")renderSplits();if(v==="pay")renderStubs();
+  if(v==="ana")renderAnalytics();if(v==="spl")renderSplits();if(v==="pay"){renderStubs();renderPaychecks();}
   if(v==="set")syncSettingsUI();
   window.scrollTo(0,0);
 }
@@ -986,7 +1037,7 @@ function initUI(){
   document.getElementById("eDate").value=todayStr();
   document.getElementById("stDate").value=todayStr();
   document.getElementById("dateSub").textContent=new Date().toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric",year:"numeric"});
-  syncSettingsUI();renderDash();renderExpenses();renderBudget();renderSplits();renderStubs();renderNoteSuggest();
+  syncSettingsUI();renderDash();renderExpenses();renderBudget();renderSplits();renderStubs();renderPaychecks();renderNoteSuggest();
   save(); // persist seed/default on first load
 }
 let toastTimer;
