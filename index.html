@@ -885,31 +885,55 @@ function renderGoals(){
   }).join("");
 }
 let _SUG=null;
+function recentFlexAnalysis(FLEX){
+  // recency-weighted: this month (projected to full) x3, last month x2, 2-ago x1
+  const now=new Date(),dim=new Date(now.getFullYear(),now.getMonth()+1,0).getDate(),dayN=now.getDate();
+  const wts={0:3,1:2,2:1};
+  const catW={},catAvg={};FLEX.forEach(c=>{catW[c.id]=0;catAvg[c.id]=0;});
+  let totW=0,months=0;
+  for(let a=0;a<=2;a++){
+    const k=new Date(now.getFullYear(),now.getMonth()-a,1).toISOString().slice(0,7);
+    let has=false;
+    FLEX.forEach(c=>{
+      let sp=DB.txns.filter(t=>t.type==="expense"&&t.cat===c.id&&t.date.slice(0,7)===k).reduce((s,t)=>s+t.amount,0);
+      if(a===0&&dayN>0)sp=sp/dayN*dim; // project current partial month
+      if(sp>0)has=true;
+      catW[c.id]+=sp*wts[a];totW+=sp*wts[a];catAvg[c.id]+=sp;
+    });
+    if(has)months++;
+  }
+  const sh={},avgCat={};let avgMonthly=0;
+  FLEX.forEach(c=>{sh[c.id]=totW>0?catW[c.id]/totW:1/FLEX.length;avgCat[c.id]=months?catAvg[c.id]/months:0;avgMonthly+=avgCat[c.id];});
+  return {sh,avgMonthly,avgCat,hasData:totW>0};
+}
 function estimateBudget(){
   const income=+num("beIncome"),saveAmt=+num("beSave"),fixed=+num("beFixed"),out=document.getElementById("beOut");
   if(income<=0){out.innerHTML=`<div class="advice warn">Enter your monthly money first.</div>`;return;}
   const flex=income-saveAmt-fixed;
   if(flex<=0){out.innerHTML=`<div class="advice bad">${money0(fixed)} fixed + ${money0(saveAmt)} saved uses up your ${money0(income)} — nothing left for everyday spending. Lower fixed costs or savings.</div>`;return;}
   const FLEX=SPEND_CATS.filter(c=>c.id!=="bills");
-  const n=new Date(),cut=new Date(n.getFullYear(),n.getMonth()-6,1).toISOString().slice(0,10);
-  const by={};let tot=0;
-  DB.txns.filter(t=>t.type==="expense"&&t.cat!=="transfer"&&t.cat!=="bills"&&t.date>=cut).forEach(t=>{by[t.cat]=(by[t.cat]||0)+t.amount;tot+=t.amount;});
+  const {sh,avgMonthly,avgCat,hasData}=recentFlexAnalysis(FLEX);
   _SUG={bills:Math.round(fixed)};
   const rows=FLEX.map(c=>{
-    const share=tot>0?(by[c.id]||0)/tot:1/FLEX.length;
-    _SUG[c.id]=Math.max(0,Math.round(flex*share));
-    return `<div class="catbar"><div class="r1"><span>${c.icon} ${c.name}</span><span>${money0(_SUG[c.id])}</span></div>
-      <div class="track"><div class="fill" style="width:${share*100}%;background:${c.color}"></div></div></div>`;
+    _SUG[c.id]=Math.max(0,Math.round(flex*sh[c.id]));
+    const vs=avgCat[c.id]>1?` <span class="muted" style="font-size:11px">(you avg ${money0(avgCat[c.id])})</span>`:"";
+    return `<div class="catbar"><div class="r1"><span>${c.icon} ${c.name}${vs}</span><span>${money0(_SUG[c.id])}</span></div>
+      <div class="track"><div class="fill" style="width:${sh[c.id]*100}%;background:${c.color}"></div></div></div>`;
   }).join("");
   const fixedRow=fixed>0?`<div class="catbar"><div class="r1"><span>🔒 Fixed (rent/bills)</span><span>${money0(fixed)}</span></div>
     <div class="track"><div class="fill" style="width:100%;background:var(--purple)"></div></div></div>`:"";
   const rate=income>0?(saveAmt/income*100):0;
-  const dim=new Date(n.getFullYear(),n.getMonth()+1,0).getDate();
-  const perDay=flex/dim;
-  const bal=balance();
-  const proj=saveAmt>0?`<div class="advice good" style="margin-top:10px">Building on your current balance of <b>${money0(bal)}</b>, this plan adds ~${money0(saveAmt)}/mo: next month ≈ <b>${money0(bal+saveAmt)}</b>, in 3 months ≈ <b>${money0(bal+3*saveAmt)}</b>, in 6 months ≈ <b>${money0(bal+6*saveAmt)}</b>.</div>`:"";
-  out.innerHTML=`<div class="hint">${money0(income)} − ${money0(fixed)} fixed − ${money0(saveAmt)} saved = <b>${money0(flex)}</b> for everyday spending (${rate.toFixed(0)}% savings rate) — about <b>${money0(perDay)}/day</b> to last the month. Fixed stays locked; the rest flexes around it:</div>
-    ${fixedRow}${rows}${proj}
+  const n=new Date(),dim=new Date(n.getFullYear(),n.getMonth()+1,0).getDate(),perDay=flex/dim,bal=balance();
+  // reality check vs your recent pace
+  let reality="";
+  if(hasData&&avgMonthly>0){
+    if(flex<avgMonthly*0.9) reality=`<div class="advice warn" style="margin-top:10px">⚠️ This is <b>${money0(avgMonthly-flex)}/mo less</b> than your recent pace (~${money0(avgMonthly)}/mo). To stick to it you'll need to cut back — the biggest room is your top categories above.</div>`;
+    else if(flex>avgMonthly*1.15) reality=`<div class="advice good" style="margin-top:10px">You have <b>${money0(flex-avgMonthly)}/mo more room</b> than you usually spend (~${money0(avgMonthly)}/mo) — consider raising savings.</div>`;
+    else reality=`<div class="advice good" style="margin-top:10px">This matches your recent pace (~${money0(avgMonthly)}/mo) — realistic and sustainable.</div>`;
+  } else reality=`<div class="hint" style="margin-top:6px">Split evenly for now — add a few weeks of expenses and it'll weight toward your real habits.</div>`;
+  const proj=saveAmt>0?`<div class="advice good" style="margin-top:10px">From your balance of <b>${money0(bal)}</b>, saving ${money0(saveAmt)}/mo → next month ≈ <b>${money0(bal+saveAmt)}</b>, in 3 months ≈ <b>${money0(bal+3*saveAmt)}</b>, in 6 months ≈ <b>${money0(bal+6*saveAmt)}</b>.</div>`:"";
+  out.innerHTML=`<div class="hint">${money0(income)} − ${money0(fixed)} fixed − ${money0(saveAmt)} saved = <b>${money0(flex)}</b> for everyday spending (${rate.toFixed(0)}% savings rate) — about <b>${money0(perDay)}/day</b>. Weighted to your recent months (recent spending counts more):</div>
+    ${fixedRow}${rows}${reality}${proj}
     <button class="btn" onclick="applySuggested()">Apply these budgets</button>`;
 }
 function applySuggested(){if(_SUG){DB.budgets={...DB.budgets,..._SUG};save();renderBudget();toast("Budgets updated ✓");}}
