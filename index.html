@@ -177,7 +177,7 @@
       <div id="quickAdd"></div>
       <div class="split">
         <div><label>Amount ($)</label><input id="eAmt" type="number" inputmode="decimal" placeholder="0.00" step="0.01"></div>
-        <div><label>Type</label><select id="eType"><option value="expense">Expense</option><option value="income">Income</option></select></div>
+        <div><label>Type</label><select id="eType" onchange="updateCatOptions()"><option value="expense">Expense</option><option value="income">Income</option></select></div>
       </div>
       <label>Category</label><select id="eCat"></select>
       <label>Name / Note</label>
@@ -293,6 +293,18 @@
       </select>
       <label>Note (optional)</label><input id="spNote" type="text" placeholder="e.g. concert tickets">
       <button class="btn" onclick="addSplit()">Add IOU</button>
+    </div>
+    <div class="card">
+      <h2>➗ Split a bill</h2>
+      <div class="muted" style="font-size:13px;margin-bottom:4px">You paid — divide it evenly among you + everyone listed, and each person gets an IOU for their share.</div>
+      <div class="split">
+        <div><label>Total ($)</label><input id="sbTotal" type="number" inputmode="decimal" placeholder="0.00" step="0.01"></div>
+        <div><label>Note</label><input id="sbNote" type="text" placeholder="e.g. dinner"></div>
+      </div>
+      <label>People (comma-separated, not you)</label>
+      <input id="sbNames" type="text" placeholder="e.g. Alex, Sam, Priya">
+      <button class="btn" onclick="splitBill()">Split it</button>
+      <div id="sbPreview" class="hint" style="margin-top:6px"></div>
     </div>
     <div class="card">
       <h2>Balances by Person</h2>
@@ -424,6 +436,13 @@ const CATS=[
 ];
 const catMap=Object.fromEntries(CATS.map(c=>[c.id,c]));
 const SPEND_CATS=CATS.filter(c=>c.id!=="transfer"); // categories that count as real spending
+const INCOME_CATS=[
+  {id:"earned",icon:"💼",name:"Earned (work)"},
+  {id:"support",icon:"🏠",name:"Family/Support"},
+  {id:"cashin",icon:"💵",name:"Cash deposit"},
+  {id:"refund",icon:"↩️",name:"Refund/Other"},
+];
+const incCatMap=Object.fromEntries(INCOME_CATS.map(c=>[c.id,c]));
 const DEFAULT={
   txns:[], splits:[], stubs:[], paychecks:[], goals:[],
   budgets:{food:200,groceries:250,goingout:150,transport:80,bills:400,shopping:100,health:50,other:60},
@@ -501,10 +520,25 @@ function suggestions(){
   if(owed>bal*0.2&&owed>20) out.push(["warn",`People owe you <b>${money0(owed)}</b> — collecting it would ease this month. See the Splits tab.`]);
   const soonSubs=detectRecurring().filter(x=>{if(!x.next)return false;const d=Math.round((new Date(x.next)-new Date(todayStr()))/864e5);return d>=0&&d<=3;});
   if(soonSubs.length) out.push(["warn",`Upcoming charge${soonSubs.length>1?"s":""} in the next few days: ${soonSubs.slice(0,3).map(x=>escapeHtml(x.name.split(" ").slice(0,2).join(" "))+" ~"+money0(x.monthly)).join(", ")}.`]);
+  // trend-aware: a category on pace to rise vs last month
+  const now=new Date(),thisK=now.toISOString().slice(0,7),lastK=new Date(now.getFullYear(),now.getMonth()-1,1).toISOString().slice(0,7),dim=new Date(now.getFullYear(),now.getMonth()+1,0).getDate();
+  const catMo=(id,k)=>DB.txns.filter(t=>t.type==="expense"&&t.cat===id&&t.date.slice(0,7)===k).reduce((s,t)=>s+t.amount,0);
+  let rise=null;
+  for(const c of SPEND_CATS){const proj=dayN>0?catMo(c.id,thisK)/dayN*dim:0,last=catMo(c.id,lastK);if(last>20&&proj>last*1.3){const pct=Math.round((proj-last)/last*100);if(!rise||pct>rise.pct)rise={c,pct,proj,last};}}
+  if(rise) out.push(["warn",`${rise.c.icon} ${rise.c.name} is trending <b>${rise.pct}% higher</b> than last month (on pace for ${money0(rise.proj)} vs ${money0(rise.last)}).`]);
+  // goal pace vs this month's net change
+  const Min=DB.txns.filter(t=>t.type==="income"&&inThisMonth(t.date)).reduce((s,t)=>s+t.amount,0);
+  const Mtr=DB.txns.filter(t=>t.type==="expense"&&t.cat==="transfer"&&inThisMonth(t.date)).reduce((s,t)=>s+t.amount,0);
+  const Mnet=Min-spent-Mtr;
   const gneed=totalGoalNeeded();
-  if(gneed>0) out.push(["good",`Savings goals: set aside <b>${money0(gneed)}/mo</b> across ${DB.goals.length} goal${DB.goals.length>1?"s":""} to stay on track.`]);
-  else if(DB.goals.some(g=>g.saved<g.target)) out.push(["good",`You have ${DB.goals.length} savings goal${DB.goals.length>1?"s":""} — add a target date in Budget for a monthly plan.`]);
-  return out;
+  if(gneed>0){
+    if(Mnet>=gneed) out.push(["good",`Net +${money0(Mnet)} this month — enough to cover your ${money0(gneed)}/mo goal target. 🎯`]);
+    else out.push([Mnet>0?"warn":"bad",`Goals need <b>${money0(gneed)}/mo</b>; you're ${Mnet>=0?"net +"+money0(Mnet):"net −"+money0(-Mnet)} this month — ${money0(Math.max(0,gneed-Mnet))} short of that savings pace.`]);
+  } else if(DB.goals.some(g=>g.saved<g.target)) out.push(["good",`You have ${DB.goals.length} savings goal${DB.goals.length>1?"s":""} — add a target date in Budget for a monthly plan.`]);
+  // positive reinforcement
+  const mm=monthlyTotals(2),lastTotal=mm[0].total,thisProj=dayN>0?spent/dayN*dim:0;
+  if(lastTotal>50&&thisProj<lastTotal*0.9&&dayN>=5) out.push(["good",`Nice — on pace to spend <b>${Math.round((1-thisProj/lastTotal)*100)}% less</b> than last month. 👏`]);
+  return out.slice(0,6);
 }
 
 /* ===================== ANALYTICS ===================== */
@@ -520,21 +554,24 @@ function monthlyTotals(n){
 }
 function renderMonthSummary(){
   const el=document.getElementById("monthSummary");if(!el)return;
-  const spent=spentThisMonth();
-  const inc=DB.txns.filter(t=>t.type==="income"&&inThisMonth(t.date)).reduce((s,t)=>s+t.amount,0);
-  const net=inc-spent;
-  const mm=monthlyTotals(2),prev=mm[0].total,cur=mm[1].total;
+  const M=DB.txns.filter(t=>inThisMonth(t.date));
+  const totalIn=M.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
+  const earned=M.filter(t=>t.type==="income"&&t.cat==="earned").reduce((s,t)=>s+t.amount,0);
+  const otherIn=totalIn-earned;
+  const spent=M.filter(t=>t.type==="expense"&&t.cat!=="transfer").reduce((s,t)=>s+t.amount,0);
+  const transfers=M.filter(t=>t.type==="expense"&&t.cat==="transfer").reduce((s,t)=>s+t.amount,0);
+  const net=totalIn-spent-transfers;
   let top=null;for(const c of SPEND_CATS){const sp=spentThisMonth(c.id);if(!top||sp>top.sp)top={c,sp};}
-  const subs=detectRecurring().reduce((s,x)=>s+x.monthly,0);
-  const overs=SPEND_CATS.filter(c=>{const cap=+DB.budgets[c.id]||0;return cap&&spentThisMonth(c.id)>cap;}).length;
-  const momTxt=prev>0?`${cur>=prev?"up":"down"} ${Math.abs((cur-prev)/prev*100).toFixed(0)}% vs last month`:"";
   el.innerHTML=`
     <div class="row" style="margin-bottom:10px">
+      <div class="mini"><div class="k">Money in</div><div class="v good">${money0(totalIn)}</div></div>
       <div class="mini"><div class="k">Spent</div><div class="v bad">${money0(spent)}</div></div>
-      <div class="mini"><div class="k">Income</div><div class="v good">${money0(inc)}</div></div>
-      <div class="mini"><div class="k">Net</div><div class="v ${net>=0?"good":"bad"}">${net>=0?"+":""}${money0(net)}</div></div>
     </div>
-    <div class="advice ${net>=0?"good":"warn"}">${net>=0?`Net positive by <b>${money0(net)}</b> this month.`:`Spending exceeds income by <b>${money0(-net)}</b> this month.`}${top&&top.sp>0?` Top: ${top.c.icon} ${top.c.name} (${money0(top.sp)}).`:""}${momTxt?` Spending ${momTxt}.`:""} ${overs?`${overs} categor${overs>1?"ies":"y"} over budget.`:"Budgets on track."} ~${money0(subs)}/mo in subscriptions.</div>`;
+    <div class="row" style="margin-bottom:10px">
+      <div class="mini"><div class="k">Transfers out</div><div class="v">${money0(transfers)}</div></div>
+      <div class="mini"><div class="k">Net change</div><div class="v ${net>=0?"good":"bad"}">${net>=0?"+":""}${money0(net)}</div></div>
+    </div>
+    <div class="advice ${net>=0?"good":"warn"}">Your balance ${net>=0?"grew":"dropped"} <b>${money0(Math.abs(net))}</b> this month = ${money0(totalIn)} in − ${money0(spent)} spent − ${money0(transfers)} transfers.${earned>0?` Of money in, <b>${money0(earned)}</b> was earned pay${otherIn>0?`, ${money0(otherIn)} was top-ups (family/cash/refunds)`:""}.`:otherIn>0?` All ${money0(otherIn)} in was top-ups (family/cash/refunds), not earned pay.`:""}${top&&top.sp>0?` Top spend: ${top.c.icon} ${top.c.name} (${money0(top.sp)}).`:""}</div>`;
 }
 function renderAnalytics(){
   renderMonthSummary();
@@ -652,6 +689,19 @@ function addSplit(){
   save();
   document.getElementById("spPerson").value="";document.getElementById("spAmt").value="";document.getElementById("spNote").value="";
   renderSplits();renderDash();toast("IOU added");
+}
+function splitBill(){
+  const total=parseFloat(document.getElementById("sbTotal").value)||0;
+  const names=document.getElementById("sbNames").value.split(",").map(s=>s.trim()).filter(Boolean);
+  const note=document.getElementById("sbNote").value.trim()||"split";
+  if(!(total>0))return toast("Enter a total");
+  if(!names.length)return toast("List at least one other person");
+  const share=Math.round(total/(names.length+1)*100)/100;
+  names.forEach((p,i)=>DB.splits.push({id:Date.now()+i,person:p,amount:share,dir:"owed",note:note,date:todayStr(),settled:false}));
+  save();
+  document.getElementById("sbTotal").value="";document.getElementById("sbNames").value="";document.getElementById("sbNote").value="";
+  document.getElementById("sbPreview").innerHTML="";
+  renderSplits();renderDash();toast(names.length+" IOU"+(names.length>1?"s":"")+" added · "+money(share)+" each");
 }
 function toggleSettle(id){const s=DB.splits.find(x=>x.id===id);if(s){s.settled=!s.settled;save();renderSplits();renderDash();}}
 let _splitPeople=[];
@@ -885,11 +935,12 @@ function renderDash(){
   const rec=DB.txns.slice().sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id).slice(0,5);
   document.getElementById("recent").innerHTML=rec.length?rec.map(txnRow).join(""):`<div class="empty">No transactions yet. Add one from Expenses.</div>`;
 }
-function txnRow(t){const c=catMap[t.cat]||catMap.other,sign=t.type==="income"?"+":"-";
-  return `<div class="txn"><div class="ic">${t.type==="income"?"💰":c.icon}</div>
-    <div class="info"><div class="t">${escapeHtml(t.note||(t.type==="income"?"Income":c.name))}</div>
-    <div class="s">${t.type==="income"?"Income":c.name} · ${fmtDate(t.date)}</div></div>
-    <div class="amt ${t.type==="income"?"income":""}">${sign}${money(t.amount)}</div>
+function txnRow(t){
+  const isInc=t.type==="income",ic=isInc?(incCatMap[t.cat]||incCatMap.refund):(catMap[t.cat]||catMap.other),sign=isInc?"+":"-";
+  return `<div class="txn"><div class="ic">${ic.icon}</div>
+    <div class="info"><div class="t">${escapeHtml(t.note||ic.name)}</div>
+    <div class="s">${ic.name} · ${fmtDate(t.date)}</div></div>
+    <div class="amt ${isInc?"income":""}">${sign}${money(t.amount)}</div>
     <button class="del" onclick="delTxn(${t.id})">×</button></div>`;}
 function renderExpenses(){
   const chips=[{id:"all",name:"All",icon:"📋"}].concat(CATS);
@@ -967,7 +1018,7 @@ function quickFill(i){
   const n=QNAMES[i];if(n==null)return;
   document.getElementById("eNote").value=n;
   document.getElementById("eType").value="expense";
-  autoCat();document.getElementById("eAmt").focus();
+  updateCatOptions();autoCat();document.getElementById("eAmt").focus();
 }
 
 /* ===================== ACTIONS ===================== */
@@ -1085,14 +1136,31 @@ function syncSettingsUI(){
   document.getElementById("payMode").textContent=s.intl?"Maryland (Baltimore County) · nonresident F-1 — FICA exempt":"Maryland (Baltimore County) · resident";
 }
 function migrate(){
-  if(DB._mig_transfer)return;
-  const rx=/(atm|zelle payment to|cash withdraw|withdrawal|venmo to|cash app)/i;
-  DB.txns.forEach(t=>{if(t.type==="expense"&&t.cat==="other"&&rx.test(t.note||""))t.cat="transfer";});
-  DB._mig_transfer=true;save();
+  if(!DB._mig_transfer){
+    const rx=/(atm|zelle payment to|cash withdraw|withdrawal|venmo to|cash app)/i;
+    DB.txns.forEach(t=>{if(t.type==="expense"&&t.cat==="other"&&rx.test(t.note||""))t.cat="transfer";});
+    DB._mig_transfer=true;
+  }
+  if(!DB._mig_income){
+    DB.txns.filter(t=>t.type==="income").forEach(t=>{
+      const n=(t.note||"").toLowerCase();
+      t.cat=/paycheck|payroll|umbc|direct dep/.test(n)?"earned"
+        :/zelle.*from|support|venmo.*from/.test(n)?"support"
+        :/atm cash deposit|cash deposit|remote.*deposit|check/.test(n)?"cashin"
+        :"refund";
+    });
+    DB._mig_income=true;
+  }
+  save();
+}
+function updateCatOptions(){
+  const t=document.getElementById("eType").value;
+  const cats=t==="income"?INCOME_CATS:CATS;
+  document.getElementById("eCat").innerHTML=cats.map(c=>`<option value="${c.id}">${c.icon} ${c.name}</option>`).join("");
 }
 function initUI(){
   migrate();
-  document.getElementById("eCat").innerHTML=CATS.map(c=>`<option value="${c.id}">${c.icon} ${c.name}</option>`).join("");
+  updateCatOptions();
   document.getElementById("eDate").value=todayStr();
   document.getElementById("stDate").value=todayStr();
   document.getElementById("dateSub").textContent=new Date().toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric",year:"numeric"});
