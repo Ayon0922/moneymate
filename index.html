@@ -385,8 +385,16 @@
       <select id="sFreq"><option value="52">Weekly</option><option value="26">Biweekly</option><option value="24">Semi-monthly</option><option value="12">Monthly</option></select>
       <label>Filing status</label>
       <select id="sFile"><option value="single">Single</option><option value="married">Married</option></select>
-      <label>MD local (county) tax rate — %</label><input id="sLocal" type="number" inputmode="decimal" step="0.01">
-      <div class="hint">Baltimore County 2026 rate is 2.83%.</div>
+      <label>State</label>
+      <select id="sState" onchange="onStateChange(true)">
+        <option value="MD">Maryland</option>
+        <option value="IN">Indiana</option>
+        <option value="none">No state income tax</option>
+        <option value="custom">Other (enter flat %)</option>
+      </select>
+      <div id="stateRateWrap" style="display:none"><label>State flat rate — %</label><input id="sStateRate" type="number" inputmode="decimal" step="0.01" placeholder="e.g. 4.5"></div>
+      <label>Local / county tax rate — %</label><input id="sLocal" type="number" inputmode="decimal" step="0.01">
+      <div class="hint" id="stateHint"></div>
     </div>
     <div class="card">
       <h2>International Student Tax</h2>
@@ -451,7 +459,7 @@ const incCatMap=Object.fromEntries(INCOME_CATS.map(c=>[c.id,c]));
 const DEFAULT={
   txns:[], splits:[], stubs:[], paychecks:[], goals:[],
   budgets:{food:200,groceries:250,goingout:150,transport:80,bills:400,shopping:100,health:50,other:60},
-  settings:{startBal:0,rate:16,freq:26,filing:"single",local:2.83,intl:true,fedStdElig:false,treaty:0}
+  settings:{startBal:0,rate:16,freq:26,filing:"single",state:"MD",stateRate:0,local:2.83,intl:true,fedStdElig:false,treaty:0}
 };
 let DB=load(); let activeFilter="all";
 
@@ -487,6 +495,17 @@ const FED_2026_MARRIED=[[0,.10],[24800,.12],[100800,.22],[211400,.24],[403550,.3
 const FED_STD={single:16100,married:32200};
 const MD_2026=[[0,.02],[1000,.03],[2000,.04],[3000,.0475],[100000,.05],[125000,.0525],[150000,.055],[250000,.0575]];
 const MD_STD_MAX=3350,MD_EXEMPT=3200,SS_RATE=.062,SS_CAP=184500,MED_RATE=.0145;
+const STATES={
+  MD:{name:"Maryland",abbr:"MD",brackets:MD_2026,stdPct:0.15,stdMin:1800,stdMax:MD_STD_MAX,exempt:MD_EXEMPT,localDefault:2.83},
+  IN:{name:"Indiana",abbr:"IN",flat:0.0295,exempt:1000,localDefault:2.0},
+  none:{name:"No state tax",abbr:"",flat:0,exempt:0,localDefault:0},
+  custom:{name:"Other",abbr:"",flat:0,exempt:0,localDefault:0},
+};
+function payModeText(){
+  const s=DB.settings,st=STATES[s.state||"MD"]||STATES.MD;
+  const nm=s.state==="custom"?`Custom ${(+s.stateRate||0)}%`:st.name;
+  return `${nm}${(+s.local)>0?` +${s.local}% local`:""} · ${s.intl?"F-1 nonresident (FICA exempt)":"resident"}`;
+}
 function taxFromBrackets(inc,b){if(inc<=0)return 0;let t=0;for(let i=0;i<b.length;i++){const lo=b[i][0],r=b[i][1],hi=i+1<b.length?b[i+1][0]:Infinity;if(inc>lo)t+=(Math.min(inc,hi)-lo)*r;else break;}return t;}
 function taxesForGross(gross){
   const s=DB.settings,periods=+s.freq,ag=gross*periods,treaty=+s.treaty||0,nonres=!!s.intl;
@@ -494,10 +513,14 @@ function taxesForGross(gross){
   const med=nonres?0:gross*MED_RATE;
   const fedStd=s.fedStdElig?FED_STD[s.filing]:0;
   const fed=taxFromBrackets(Math.max(0,ag-fedStd-treaty),s.filing==="married"?FED_2026_MARRIED:FED_2026_SINGLE)/periods;
-  const mdStd=Math.min(MD_STD_MAX,Math.max(1800,ag*0.15));
-  const mdTaxable=Math.max(0,ag-mdStd-MD_EXEMPT);
-  const state=taxFromBrackets(mdTaxable,MD_2026)/periods;
-  const local=(mdTaxable*(+s.local/100))/periods;
+  const stc=STATES[s.state||"MD"]||STATES.MD;
+  let stStd=0; if(stc.stdPct)stStd=Math.min(stc.stdMax,Math.max(stc.stdMin,ag*stc.stdPct));
+  const stTaxable=Math.max(0,ag-stStd-(stc.exempt||0));
+  let stAnnual;
+  if(stc.brackets)stAnnual=taxFromBrackets(stTaxable,stc.brackets);
+  else{const flat=(s.state==="custom")?((+s.stateRate||0)/100):(stc.flat||0);stAnnual=stTaxable*flat;}
+  const state=stAnnual/periods;
+  const local=(stTaxable*(+s.local/100))/periods;
   const totalTax=ss+med+fed+state+local, net=gross-totalTax;
   return {gross,ss,med,fed,state,local,totalTax,net,ag,nonres,effRate:gross>0?totalTax/gross:0};
 }
@@ -998,8 +1021,12 @@ function renderBudget(){
 }
 function renderPay(p,hours){
   const mode=document.getElementById("payMode");
-  mode.textContent=DB.settings.intl?"Maryland (Baltimore County) · nonresident F-1 — FICA exempt":"Maryland (Baltimore County) · resident";
+  mode.textContent=payModeText();
   if(!p){document.getElementById("payOut").innerHTML="";return;}
+  const stc=STATES[DB.settings.state||"MD"]||STATES.MD;
+  const stName=DB.settings.state==="custom"?"State":(stc.abbr?stc.abbr+" state":"State");
+  const stRow=(DB.settings.state==="none")?"":`<div class="pill"><span>${stName} tax</span><span class="neg">-${money(p.state)}</span></div>`;
+  const locRow=(+DB.settings.local>0)?`<div class="pill"><span>Local/county (${DB.settings.local}%)</span><span class="neg">-${money(p.local)}</span></div>`:"";
   const fica=DB.settings.intl
     ?`<div class="pill"><span>Social Security / Medicare</span><b style="color:var(--good)">Exempt (F-1)</b></div>`
     :`<div class="pill"><span>Social Security (6.2%)</span><span class="neg">-${money(p.ss)}</span></div>
@@ -1008,8 +1035,8 @@ function renderPay(p,hours){
     <div class="pill"><span>Gross pay</span><b>${money(p.gross)}</b></div>
     ${fica}
     <div class="pill"><span>Federal income tax</span><span class="neg">-${money(p.fed)}</span></div>
-    <div class="pill"><span>MD state tax</span><span class="neg">-${money(p.state)}</span></div>
-    <div class="pill"><span>Baltimore County (${DB.settings.local}%)</span><span class="neg">-${money(p.local)}</span></div>
+    ${stRow}
+    ${locRow}
     <div class="grand"><span>Net take-home</span><span class="g">${money(p.net)}</span></div>
     <div class="hint">Effective tax ${(p.effRate*100).toFixed(1)}% · annualized gross ${money0(p.ag)}.
       ${DB.settings.intl?"Nonresident: no federal standard deduction unless a treaty applies. ":""}Planning estimate — real check depends on your MW507/W-4.</div>
@@ -1123,7 +1150,9 @@ function saveSettings(){
   s.rate=parseFloat(document.getElementById("sRate").value)||16;
   s.freq=document.getElementById("sFreq").value;
   s.filing=document.getElementById("sFile").value;
-  s.local=parseFloat(document.getElementById("sLocal").value)||2.83;
+  s.state=document.getElementById("sState").value;
+  s.stateRate=parseFloat(document.getElementById("sStateRate").value)||0;
+  s.local=parseFloat(document.getElementById("sLocal").value)||0;
   s.intl=document.getElementById("sIntl").checked;
   s.fedStdElig=document.getElementById("sStd").checked;
   s.treaty=parseFloat(document.getElementById("sTreaty").value)||0;
@@ -1158,11 +1187,21 @@ function syncSettingsUI(){
   document.getElementById("sFreq").value=s.freq;
   document.getElementById("sFile").value=s.filing;
   document.getElementById("sLocal").value=s.local;
+  document.getElementById("sState").value=s.state||"MD";
+  document.getElementById("sStateRate").value=s.stateRate||"";
+  onStateChange(false);
   document.getElementById("sIntl").checked=s.intl;
   document.getElementById("sStd").checked=s.fedStdElig;
   document.getElementById("sTreaty").value=s.treaty;
   document.getElementById("pRate").value=s.rate;
-  document.getElementById("payMode").textContent=s.intl?"Maryland (Baltimore County) · nonresident F-1 — FICA exempt":"Maryland (Baltimore County) · resident";
+  document.getElementById("payMode").textContent=payModeText();
+}
+function onStateChange(userChanged){
+  const st=document.getElementById("sState").value;
+  document.getElementById("stateRateWrap").style.display=st==="custom"?"block":"none";
+  if(userChanged&&STATES[st])document.getElementById("sLocal").value=STATES[st].localDefault;
+  const hints={MD:"Maryland: enter your county rate (Baltimore County 2026 = 2.83%).",IN:"Indiana: counties charge 0.5–3%. Enter your county's rate (e.g. Marion ≈ 2.0%).",none:"No state income tax — state & local stay 0.",custom:"Enter your state's flat rate above, plus any local/city rate here."};
+  document.getElementById("stateHint").textContent=hints[st]||"";
 }
 function migrate(){
   if(!DB._mig_transfer){
