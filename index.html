@@ -208,6 +208,10 @@
       <h2>📅 This Month at a Glance</h2>
       <div id="monthSummary"></div>
     </div>
+    <div class="card">
+      <h2>📈 Daily Trends & Runway</h2>
+      <div id="dailyTrends"></div>
+    </div>
     <div class="row" style="margin-bottom:14px">
       <div class="mini"><div class="k">Avg / month</div><div class="v" id="aAvgMonth">$0</div></div>
       <div class="mini"><div class="k">Avg / day (mo)</div><div class="v" id="aAvgDay">$0</div></div>
@@ -318,6 +322,9 @@
     <div class="card">
       <h2>Balances by Person</h2>
       <div id="spPeople"></div>
+    </div>
+    <div class="card" id="spTabCard" style="display:none">
+      <div id="spTab"></div>
     </div>
     <div class="card">
       <h2>All IOUs</h2>
@@ -610,8 +617,39 @@ function renderMonthSummary(){
     </div>
     <div class="advice ${net>=0?"good":"warn"}">Your balance ${net>=0?"grew":"dropped"} <b>${money0(Math.abs(net))}</b> this month = ${money0(totalIn)} in − ${money0(spent)} spent − ${money0(transfers)} transfers.${earned>0?` Of money in, <b>${money0(earned)}</b> was earned pay${otherIn>0?`, ${money0(otherIn)} was top-ups (family/cash/refunds)`:""}.`:otherIn>0?` All ${money0(otherIn)} in was top-ups (family/cash/refunds), not earned pay.`:""}${top&&top.sp>0?` Top spend: ${top.c.icon} ${top.c.name} (${money0(top.sp)}).`:""}</div>`;
 }
+function renderDailyTrends(){
+  const el=document.getElementById("dailyTrends");if(!el)return;
+  const now=new Date(),iso=d=>d.toISOString().slice(0,10);
+  // last 14 days daily spend (real spending, excl transfers)
+  const days=[];for(let i=13;i>=0;i--){const d=new Date(now.getFullYear(),now.getMonth(),now.getDate()-i);const k=iso(d);
+    const sp=DB.txns.filter(t=>t.type==="expense"&&t.cat!=="transfer"&&t.date===k).reduce((s,t)=>s+t.amount,0);
+    days.push({k,sp,lbl:d.getDate()});}
+  const last30=DB.txns.filter(t=>t.type==="expense"&&t.cat!=="transfer"&&(now-new Date(t.date+"T00:00"))/864e5<=30).reduce((s,t)=>s+t.amount,0);
+  const burn=last30/30;                                  // avg $/day over last 30d
+  const dim=new Date(now.getFullYear(),now.getMonth()+1,0).getDate(),dayN=now.getDate();
+  const soFar=DB.txns.filter(t=>t.type==="expense"&&t.cat!=="transfer"&&t.date.slice(0,7)===iso(now).slice(0,7)).reduce((s,t)=>s+t.amount,0);
+  const projMonth=dayN>0?soFar/dayN*dim:0;
+  const bal=totalBalance();
+  const runway=burn>0?Math.floor(bal/burn):Infinity;
+  const daysLeft=dim-dayN+1, safePerDay=daysLeft>0?Math.max(0,bal)/daysLeft:0;
+  const max=Math.max(1,...days.map(d=>d.sp));
+  const bars=days.map(d=>`<div class="col"><div class="bx" style="height:${d.sp/max*100}%;background:${d.sp>burn*1.5?"var(--bad)":"linear-gradient(180deg,var(--accent),#2563eb)"}"></div><div class="lb">${d.lbl}</div></div>`).join("");
+  el.innerHTML=`
+    <div class="row" style="margin-bottom:10px">
+      <div class="mini"><div class="k">Avg / day (30d)</div><div class="v">${money0(burn)}</div></div>
+      <div class="mini"><div class="k">Proj. month-end</div><div class="v ${projMonth>totalBudget()?"bad":""}">${money0(projMonth)}</div></div>
+    </div>
+    <div class="row" style="margin-bottom:10px">
+      <div class="mini"><div class="k">Runway (total ÷ pace)</div><div class="v ${runway<14?"bad":runway<30?"warn":"good"}">${runway===Infinity?"—":runway+" days"}</div></div>
+      <div class="mini"><div class="k">Safe / day left</div><div class="v warn">${money0(safePerDay)}</div></div>
+    </div>
+    <div class="muted" style="font-size:11px;margin:4px 0 2px">Daily spend, last 14 days (red = spike):</div>
+    <div class="trend" style="height:90px">${bars}</div>
+    <div class="advice ${runway<21?"warn":"good"}" style="margin-top:10px">At <b>${money0(burn)}/day</b>, your ${money0(bal)} total lasts about <b>${runway===Infinity?"—":runway+" days"}</b>. To glide to month-end, keep spending under <b>${money0(safePerDay)}/day</b> for the remaining ${daysLeft} day${daysLeft>1?"s":""}.</div>`;
+}
 function renderAnalytics(){
   renderMonthSummary();
+  renderDailyTrends();
   const months=monthlyTotals(6);
   const spentMonths=months.filter(m=>m.total>0);
   const allTime=DB.txns.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
@@ -742,16 +780,18 @@ function splitBill(){
 }
 function toggleSettle(id){const s=DB.splits.find(x=>x.id===id);if(s){s.settled=!s.settled;save();renderSplits();renderDash();}}
 let _splitPeople=[];
-function settlePerson(i){
-  const person=_splitPeople[i];if(person==null)return;
+function settlePerson(i){settlePersonByName(_splitPeople[i]);}
+function settlePersonByName(person){
+  if(person==null)return;
   const open=DB.splits.filter(s=>s.person===person&&!s.settled);
   if(!open.length)return;
   if(!confirm("Settle up with "+person+"? This marks all "+open.length+" open item"+(open.length>1?"s":"")+" as settled."))return;
   open.forEach(s=>s.settled=true);
   save();renderSplits();renderDash();toast("Settled up with "+person);
 }
-function recordPayment(i){
-  const person=_splitPeople[i];if(person==null)return;
+function recordPayment(i){recordPaymentByName(_splitPeople[i]);}
+function recordPaymentByName(person){
+  if(person==null)return;
   const open=DB.splits.filter(s=>s.person===person&&!s.settled);
   const net=open.reduce((a,s)=>a+(s.dir==="owed"?s.amount:-s.amount),0);
   if(Math.abs(net)<0.001)return;
@@ -776,6 +816,52 @@ function recordPayment(i){
   save();renderSplits();renderDash();toast(money(pay)+" recorded");
 }
 function delSplit(id){DB.splits=DB.splits.filter(x=>x.id!==id);save();renderSplits();renderDash();}
+let _activePerson=null;
+function escapeAttr(s){return (s||"").replace(/\\/g,"\\\\").replace(/'/g,"\\'").replace(/"/g,"&quot;");}
+function openPerson(i){_activePerson=_splitPeople[i];renderPersonTab();const c=document.getElementById("spTabCard");if(c)c.scrollIntoView({behavior:"smooth",block:"center"});}
+function closePerson(){_activePerson=null;renderPersonTab();}
+function addPersonItem(){
+  if(!_activePerson)return;
+  const amt=parseFloat(document.getElementById("ptAmt").value);
+  if(!(amt>0))return toast("Enter an amount");
+  DB.splits.push({id:Date.now(),person:_activePerson,amount:Math.round(amt*100)/100,dir:document.getElementById("ptDir").value,note:document.getElementById("ptNote").value.trim(),date:todayStr(),settled:false});
+  save();renderSplits();renderDash();toast("Added to "+_activePerson);
+}
+function renderPersonTab(){
+  const card=document.getElementById("spTabCard"),el=document.getElementById("spTab");
+  if(!card||!el)return;
+  if(!_activePerson){card.style.display="none";el.innerHTML="";return;}
+  const p=_activePerson;
+  const items=DB.splits.filter(s=>s.person===p).sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id);
+  const net=items.filter(s=>!s.settled).reduce((a,s)=>a+(s.dir==="owed"?s.amount:-s.amount),0);
+  const netTxt=Math.abs(net)<0.01?"is all settled up":net>0?`owes you <b>${money0(net)}</b>`:`— you owe <b>${money0(-net)}</b>`;
+  const open=items.some(s=>!s.settled);
+  card.style.display="block";
+  el.innerHTML=`
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2 style="margin:0">🧑 ${escapeHtml(p)}</h2>
+      <button class="del" onclick="closePerson()">×</button></div>
+    <div class="advice ${net>=0?"good":"warn"}" style="margin:8px 0">${escapeHtml(p)} ${netTxt}.</div>
+    <div class="split">
+      <div><label>Amount ($)</label><input id="ptAmt" type="number" inputmode="decimal" step="0.01" placeholder="0.00"></div>
+      <div><label>Direction</label><select id="ptDir"><option value="owed">They owe me</option><option value="owe">I owe them</option></select></div>
+    </div>
+    <label>Note</label><input id="ptNote" type="text" placeholder="e.g. lunch">
+    <button class="btn sm" style="margin-top:10px;width:100%" onclick="addPersonItem()">Add to tab</button>
+    ${open?`<div class="split" style="margin-top:8px">
+      <button class="btn ghost sm" style="flex:1" onclick="recordPaymentByName('${escapeAttr(p)}')">Record payment</button>
+      <button class="btn ghost sm" style="flex:1" onclick="settlePersonByName('${escapeAttr(p)}')">Settle up</button></div>`:""}
+    <div style="margin-top:12px;border-top:1px solid var(--line);padding-top:6px">
+      ${items.length?items.map(s=>`
+        <div class="split-item ${s.settled?"done":""}">
+          <div class="ic">${s.dir==="owed"?"⬅️":"➡️"}</div>
+          <div class="who"><div class="n">${money0(s.amount)} · ${s.dir==="owed"?"they owe":"you owe"}${s.settled?" · settled":""}</div>
+            <div class="m">${s.note?escapeHtml(s.note)+" · ":""}${fmtDate(s.date)}</div></div>
+          <button class="btn ghost sm" onclick="toggleSettle(${s.id})">${s.settled?"Reopen":"Settle"}</button>
+          <button class="del" onclick="delSplit(${s.id})">×</button>
+        </div>`).join(""):`<div class="empty">No items with ${escapeHtml(p)} yet.</div>`}
+    </div>`;
+}
 function renderSplits(){
   const t=splitTotals();
   document.getElementById("spOwed").textContent=money0(t.owed);
@@ -791,13 +877,14 @@ function renderSplits(){
   _splitPeople=people.map(([p])=>p);
   document.getElementById("spPeople").innerHTML=people.length?people.map(([p,v],i)=>`
     <div class="split-item" style="flex-wrap:wrap"><div class="ic">${v>=0?"🟢":"🔴"}</div>
-    <div class="who"><div class="n">${escapeHtml(p)}</div><div class="m">${v>=0?"owes you":"you owe"}</div></div>
+    <div class="who" onclick="openPerson(${i})" style="cursor:pointer"><div class="n">${escapeHtml(p)} <span style="color:var(--accent);font-size:13px">›</span></div><div class="m">${v>=0?"owes you":"you owe"} · tap to open tab</div></div>
     <div class="amt ${v>=0?"pos":"negx"}">${money0(Math.abs(v))}</div>
     <div style="width:100%;display:flex;gap:8px;margin-top:8px">
       <button class="btn sm" style="flex:1" onclick="recordPayment(${i})">Record payment</button>
       <button class="btn ghost sm" style="flex:1" onclick="settlePerson(${i})">Settle up</button>
     </div></div>`).join("")
     :`<div class="empty">No open balances — you're all squared up.</div>`;
+  renderPersonTab();
   // list
   const list=DB.splits.slice().sort((a,b)=>b.id-a.id);
   document.getElementById("spList").innerHTML=list.length?list.map(s=>`
@@ -1258,6 +1345,7 @@ function toast(m){const t=document.getElementById("toast");t.textContent=m;t.cla
 function fmtDate(d){return new Date(d+"T00:00").toLocaleDateString("en-US",{month:"short",day:"numeric"});}
 function escapeHtml(s){return (s||"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));}
 initUI();
+if("serviceWorker" in navigator){window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));}
 </script>
 </body>
 </html>
