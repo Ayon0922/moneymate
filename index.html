@@ -223,6 +223,7 @@
     <div class="card">
       <h2>Spending Trend (6 mo)</h2>
       <div class="trend" id="trend"></div>
+      <div id="monthDetail"></div>
     </div>
     <div class="card">
       <h2>This Month by Category</h2>
@@ -383,6 +384,18 @@
       <div id="stubSummary"></div>
       <div id="stubList"></div>
     </div>
+
+    <div class="card">
+      <h2>🧾 Tax Summary</h2>
+      <div id="taxSummary"></div>
+      <label style="margin-top:10px">Add a tax item (scholarship, bank interest, 1099, etc.)</label>
+      <div class="split">
+        <div><input id="txLabel" type="text" placeholder="e.g. Bank interest (1099-INT)"></div>
+        <div><input id="txAmt" type="number" inputmode="decimal" step="0.01" placeholder="$ amount"></div>
+      </div>
+      <button class="btn sm" style="margin-top:8px;width:100%" onclick="addTaxItem()">Add tax item</button>
+      <div id="taxItems" style="margin-top:10px"></div>
+    </div>
   </section>
 
   <!-- SETTINGS -->
@@ -470,7 +483,7 @@ const INCOME_CATS=[
 ];
 const incCatMap=Object.fromEntries(INCOME_CATS.map(c=>[c.id,c]));
 const DEFAULT={
-  txns:[], splits:[], stubs:[], paychecks:[], goals:[],
+  txns:[], splits:[], stubs:[], paychecks:[], goals:[], taxItems:[],
   budgets:{food:200,groceries:250,goingout:150,transport:80,bills:400,shopping:100,health:50,other:60},
   settings:{startBal:0,cashBal:0,rate:16,freq:26,filing:"single",state:"MD",stateRate:0,local:2.83,intl:true,fedStdElig:false,treaty:0}
 };
@@ -485,7 +498,7 @@ function load(){
       settings:{...DEFAULT.settings,...(d.settings||{})},
       budgets:{...DEFAULT.budgets,...(d.budgets||{})},
       goals:(d.goals&&d.goals.length)?d.goals:(d.goal&&d.goal.target?[{id:Date.now(),...d.goal}]:[]),
-      splits:d.splits||[], stubs:d.stubs||[], paychecks:d.paychecks||[]};
+      splits:d.splits||[], stubs:d.stubs||[], paychecks:d.paychecks||[], taxItems:d.taxItems||[]};
   }catch(e){return structuredClone(DEFAULT);}
 }
 function save(){localStorage.setItem("moneymate",JSON.stringify(DB));}
@@ -633,7 +646,7 @@ function renderDailyTrends(){
   const runway=burn>0?Math.floor(bal/burn):Infinity;
   const daysLeft=dim-dayN+1, safePerDay=daysLeft>0?Math.max(0,bal)/daysLeft:0;
   const max=Math.max(1,...days.map(d=>d.sp));
-  const bars=days.map(d=>`<div class="col"><div class="bx" style="height:${d.sp/max*100}%;background:${d.sp>burn*1.5?"var(--bad)":"linear-gradient(180deg,var(--accent),#2563eb)"}"></div><div class="lb">${d.lbl}</div></div>`).join("");
+  const bars=days.map(d=>`<div class="col"><div class="vl" style="font-size:8px">${d.sp>0?"$"+Math.round(d.sp):""}</div><div class="bx" style="height:${d.sp/max*100}%;background:${d.sp>burn*1.5?"var(--bad)":"linear-gradient(180deg,var(--accent),#2563eb)"}"></div><div class="lb">${d.lbl}</div></div>`).join("");
   el.innerHTML=`
     <div class="row" style="margin-bottom:10px">
       <div class="mini"><div class="k">Avg / day (30d)</div><div class="v">${money0(burn)}</div></div>
@@ -667,8 +680,9 @@ function renderAnalytics(){
   // trend
   const max=Math.max(1,...months.map(m=>m.total));
   document.getElementById("trend").innerHTML=months.map(m=>`
-    <div class="col"><div class="vl">${m.total>0?money0(m.total):""}</div>
+    <div class="col" onclick="showMonthDetail('${m.key}')" style="cursor:pointer"><div class="vl">${m.total>0?money0(m.total):""}</div>
     <div class="bx" style="height:${m.total/max*100}%"></div><div class="lb">${m.label}</div></div>`).join("");
+  document.getElementById("monthDetail").innerHTML=`<div class="hint" style="margin-top:8px;text-align:center">Tap a bar to see that month's breakdown.</div>`;
   // category breakdown this month
   const rows=SPEND_CATS.map(c=>({c,sp:spentThisMonth(c.id)})).filter(x=>x.sp>0).sort((a,b)=>b.sp-a.sp);
   const tot=rows.reduce((s,x)=>s+x.sp,0);
@@ -684,8 +698,31 @@ function renderAnalytics(){
       <div class="track"><div class="fill" style="width:${inc/m2*100}%;background:var(--good)"></div></div></div>
     <div class="catbar"><div class="r1"><span>🧾 Expenses</span><span>${money0(thisMo)}</span></div>
       <div class="track"><div class="fill" style="width:${thisMo/m2*100}%;background:var(--bad)"></div></div></div>
-    <div class="hint">${inc>=thisMo?`Net positive: +${money0(inc-thisMo)} this month.`:`Spending exceeds income by ${money0(thisMo-inc)} this month.`}</div>`;
+    <div class="hint">${inc>=thisMo?`Net positive: +${money0(inc-thisMo)} this month.`:`Spending exceeds income by ${money0(thisMo-inc)} this month.`}</div>
+    <div class="split" style="margin-top:8px">
+      <button class="btn ghost sm" style="flex:1" onclick="toggleItems('inc')">Income items</button>
+      <button class="btn ghost sm" style="flex:1" onclick="toggleItems('exp')">Expense items</button>
+    </div>
+    <div id="ivsItems" style="margin-top:8px"></div>`;
+  _ivsShown=null;
   renderSubs();
+}
+let _ivsShown=null;
+function toggleItems(kind){
+  const el=document.getElementById("ivsItems");if(!el)return;
+  if(_ivsShown===kind){_ivsShown=null;el.innerHTML="";return;}
+  _ivsShown=kind;
+  const list=DB.txns.filter(t=>inThisMonth(t.date)&&t.type===(kind==="inc"?"income":"expense")).sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id);
+  const total=list.reduce((s,t)=>s+t.amount,0);
+  el.innerHTML=(list.length?`<div class="hint">${list.length} ${kind==="inc"?"income":"expense"} item${list.length>1?"s":""} · ${money0(total)} total</div>`+list.map(txnRow).join(""):`<div class="empty">No ${kind==="inc"?"income":"expenses"} this month.</div>`);
+}
+function showMonthDetail(key){
+  const el=document.getElementById("monthDetail");if(!el)return;
+  const rows=SPEND_CATS.map(c=>({c,sp:DB.txns.filter(t=>t.type==="expense"&&t.cat===c.id&&t.date.slice(0,7)===key).reduce((s,t)=>s+t.amount,0)})).filter(x=>x.sp>0).sort((a,b)=>b.sp-a.sp);
+  const tot=rows.reduce((s,x)=>s+x.sp,0);
+  const label=new Date(key+"-01T00:00").toLocaleDateString("en-US",{month:"long",year:"numeric"});
+  el.innerHTML=`<div class="hint" style="margin-top:8px"><b>${label}</b> — spent ${money0(tot)}:</div>`+
+    (rows.length?rows.map(x=>`<div class="catbar"><div class="r1"><span>${x.c.icon} ${x.c.name}</span><span>${money0(x.sp)} · ${(x.sp/tot*100).toFixed(0)}%</span></div><div class="track"><div class="fill" style="width:${x.sp/tot*100}%;background:${x.c.color}"></div></div></div>`).join(""):`<div class="empty">No spending that month.</div>`);
 }
 
 /* ===================== RECURRING / SUBSCRIPTIONS ===================== */
@@ -1280,7 +1317,7 @@ function go(v){
   document.getElementById("v-"+v).classList.add("active");
   document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("active",b.dataset.v===v));
   if(v==="dash")renderDash();if(v==="exp")renderExpenses();if(v==="bud"){renderBudget();renderBudgetExtras();}
-  if(v==="ana")renderAnalytics();if(v==="spl")renderSplits();if(v==="pay"){renderStubs();renderPaychecks();}
+  if(v==="ana")renderAnalytics();if(v==="spl")renderSplits();if(v==="pay"){renderStubs();renderPaychecks();renderTax();renderTaxItems();}
   if(v==="set")syncSettingsUI();
   window.scrollTo(0,0);
 }
@@ -1337,13 +1374,45 @@ function initUI(){
   document.getElementById("eDate").value=todayStr();
   document.getElementById("stDate").value=todayStr();
   document.getElementById("dateSub").textContent=new Date().toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric",year:"numeric"});
-  syncSettingsUI();renderDash();renderExpenses();renderBudget();renderSplits();renderStubs();renderPaychecks();renderNoteSuggest();
+  syncSettingsUI();renderDash();renderExpenses();renderBudget();renderSplits();renderStubs();renderPaychecks();renderTax();renderTaxItems();renderNoteSuggest();
   save(); // persist seed/default on first load
 }
 let toastTimer;
 function toast(m){const t=document.getElementById("toast");t.textContent=m;t.classList.add("show");clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove("show"),1600);}
 function fmtDate(d){return new Date(d+"T00:00").toLocaleDateString("en-US",{month:"short",day:"numeric"});}
 function escapeHtml(s){return (s||"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));}
+function renderTax(){
+  const el=document.getElementById("taxSummary");if(!el)return;
+  const yr=todayStr().slice(0,4);
+  const stubs=DB.stubs.filter(s=>(s.date||"").slice(0,4)===yr);
+  const g=k=>stubs.reduce((a,s)=>a+(k==="gross"?(+s.gross||0):(+(s.actual&&s.actual[k])||0)),0);
+  const gross=g("gross"),fed=g("fed"),state=g("state"),local=g("local"),ss=g("ss"),med=g("med"),fica=ss+med;
+  const items=DB.taxItems||[],itemsTot=items.reduce((a,t)=>a+(+t.amount||0),0);
+  const intl=DB.settings.intl,totalIncome=gross+itemsTot;
+  el.innerHTML=`
+    <div class="muted" style="font-size:13px;margin-bottom:8px">From ${stubs.length} pay stub${stubs.length!==1?"s":""} logged for ${yr}. Reconcile more stubs above to complete it.</div>
+    <div class="pill"><span>Wages (gross, ${yr})</span><b>${money(gross)}</b></div>
+    <div class="pill"><span>Federal withheld</span><span>${money(fed)}</span></div>
+    <div class="pill"><span>State + local withheld</span><span>${money(state+local)}</span></div>
+    <div class="pill"><span>Social Security + Medicare</span><span>${money(fica)}</span></div>
+    ${itemsTot>0?`<div class="pill"><span>Other reported income</span><span>${money(itemsTot)}</span></div>`:""}
+    <div class="grand"><span>Total reportable income</span><span>${money(totalIncome)}</span></div>
+    ${intl&&fica>0.5?`<div class="advice bad" style="margin-top:8px">⚠️ ${money(fica)} of FICA was withheld even though you're F-1 exempt — reclaim it via your employer, or IRS Form 843 + 8316.</div>`:""}
+    <div class="advice good" style="margin-top:8px"><b>Forms you'll likely need${intl?" (F-1 nonresident)":""}:</b> ${intl?"Form 8843 (all F-1 students), Form 1040-NR, your W-2":"Form 1040, your W-2"}${(state+local)>0?", a state return":""}${intl&&fica>0.5?", Form 843 + 8316 for the FICA refund":""}${items.length?", plus documents for the items you added":""}. Summary only — not tax advice.</div>`;
+}
+function renderTaxItems(){
+  const el=document.getElementById("taxItems");if(!el)return;
+  const items=DB.taxItems||[];
+  el.innerHTML=items.length?items.map(t=>`<div class="split-item"><div class="ic">🧾</div><div class="who"><div class="n">${escapeHtml(t.label)}</div></div><div class="amt">${money(t.amount)}</div><button class="del" onclick="delTaxItem(${t.id})">×</button></div>`).join(""):`<div class="empty">No manual tax items yet.</div>`;
+}
+function addTaxItem(){
+  const label=document.getElementById("txLabel").value.trim(),amt=parseFloat(document.getElementById("txAmt").value)||0;
+  if(!label)return toast("Enter a label");
+  (DB.taxItems=DB.taxItems||[]).push({id:Date.now(),label,amount:Math.round(amt*100)/100});
+  save();document.getElementById("txLabel").value="";document.getElementById("txAmt").value="";
+  renderTax();renderTaxItems();toast("Tax item added");
+}
+function delTaxItem(id){DB.taxItems=(DB.taxItems||[]).filter(t=>t.id!==id);save();renderTax();renderTaxItems();}
 initUI();
 if("serviceWorker" in navigator){window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));}
 </script>
