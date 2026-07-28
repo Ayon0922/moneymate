@@ -395,6 +395,7 @@
       </div>
       <button class="btn sm" style="margin-top:8px;width:100%" onclick="addTaxItem()">Add tax item</button>
       <div id="taxItems" style="margin-top:10px"></div>
+      <button class="btn ghost" style="margin-top:12px" onclick="exportTax()">⬇︎ Export tax summary (.txt)</button>
     </div>
   </section>
 
@@ -1413,6 +1414,49 @@ function addTaxItem(){
   renderTax();renderTaxItems();toast("Tax item added");
 }
 function delTaxItem(id){DB.taxItems=(DB.taxItems||[]).filter(t=>t.id!==id);save();renderTax();renderTaxItems();}
+function exportTax(){
+  const yr=todayStr().slice(0,4);
+  const stubs=DB.stubs.filter(s=>(s.date||"").slice(0,4)===yr).sort((a,b)=>a.date.localeCompare(b.date));
+  const g=k=>stubs.reduce((a,s)=>a+(k==="gross"?(+s.gross||0):(+(s.actual&&s.actual[k])||0)),0);
+  const gross=g("gross"),fed=g("fed"),state=g("state"),local=g("local"),ss=g("ss"),med=g("med"),fica=ss+med;
+  const items=DB.taxItems||[],itemsTot=items.reduce((a,t)=>a+(+t.amount||0),0);
+  const intl=DB.settings.intl,stc=STATES[DB.settings.state||"MD"];
+  const stName=DB.settings.state==="custom"?"Custom state":(DB.settings.state==="none"?"No state income tax":(stc?stc.name:"State"));
+  const m=n=>"$"+(+n||0).toFixed(2);
+  const L=[];
+  L.push("MONEYMATE — TAX SUMMARY "+yr);
+  L.push("Generated "+new Date().toLocaleDateString("en-US",{year:"numeric",month:"long",day:"numeric"}));
+  L.push("Filing profile: "+(intl?"F-1/J-1 nonresident (FICA-exempt)":"Resident")+" · "+stName);
+  L.push("========================================");
+  L.push("");
+  L.push("EARNINGS & WITHHOLDING  (from "+stubs.length+" logged pay stub"+(stubs.length!==1?"s":"")+")");
+  L.push("  Wages (gross).............. "+m(gross));
+  L.push("  Federal withheld........... "+m(fed));
+  L.push("  State + local withheld..... "+m(state+local));
+  L.push("  Social Security + Medicare. "+m(fica));
+  L.push("");
+  if(stubs.length){
+    L.push("PER-STUB DETAIL");
+    stubs.forEach(s=>{const a=s.actual||{};const net=(+s.gross||0)-((+a.fed||0)+(+a.state||0)+(+a.local||0)+(+a.ss||0)+(+a.med||0)+(+a.other||0));
+      L.push("  "+s.date+"   gross "+m(s.gross)+"   fed "+m(a.fed)+"   state+local "+m((+a.state||0)+(+a.local||0))+"   net "+m(net));});
+    L.push("");
+  }
+  if(items.length){
+    L.push("OTHER REPORTED ITEMS");
+    items.forEach(t=>L.push("  "+t.label+" — "+m(t.amount)));
+    L.push("  Subtotal................... "+m(itemsTot));
+    L.push("");
+  }
+  L.push("TOTAL REPORTABLE INCOME...... "+m(gross+itemsTot));
+  L.push("");
+  if(intl&&fica>0.5){L.push("NOTE: "+m(fica)+" FICA was withheld though F-1 exempt — reclaimable via employer or IRS Form 843 + 8316.");L.push("");}
+  L.push("FORMS LIKELY NEEDED: "+(intl?"Form 8843, Form 1040-NR, W-2":"Form 1040, W-2")+((state+local)>0?", state return":"")+(intl&&fica>0.5?", Form 843 + 8316":"")+".");
+  L.push("");
+  L.push("Personal summary for your records / tax preparer. Not tax advice.");
+  const blob=new Blob([L.join("\n")],{type:"text/plain"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="moneymate-tax-summary-"+yr+".txt";a.click();
+  toast("Tax summary exported");
+}
 initUI();
 if("serviceWorker" in navigator){window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));}
 </script>
