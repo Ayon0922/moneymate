@@ -196,6 +196,13 @@
       <button class="btn" onclick="addTxn()">Add</button>
     </div>
     <div class="card">
+      <h2>📥 Import bank CSV</h2>
+      <div class="muted" style="font-size:13px;margin-bottom:8px">Download your transactions as a CSV from your bank, then pick the file. It auto-categorizes, skips anything already imported, and sets your balance from the file.</div>
+      <input id="csvFile" type="file" accept=".csv,text/csv" style="display:none" onchange="importCSV(this)">
+      <button class="btn" onclick="document.getElementById('csvFile').click()">Choose CSV file</button>
+      <div id="csvPreview" style="margin-top:12px"></div>
+    </div>
+    <div class="card">
       <h2>History</h2>
       <div class="chips" id="filterChips"></div>
       <div id="txnList"></div>
@@ -1387,6 +1394,72 @@ function importData(input){
   }catch(e){toast("Invalid backup file");}};
   r.readAsText(f);input.value="";}
 function resetAll(){if(confirm("Erase ALL data and start fresh?")){DB=structuredClone(DEFAULT);save();initUI();toast("Reset done");}}
+/* ===================== IN-APP BANK CSV IMPORT ===================== */
+let _pendingImport=null;
+function parseCSV(text){
+  const rows=[];let i=0,field="",row=[],inQ=false;
+  while(i<text.length){const c=text[i];
+    if(inQ){if(c==='"'){if(text[i+1]==='"'){field+='"';i++;}else inQ=false;}else field+=c;}
+    else{if(c==='"')inQ=true;else if(c===','){row.push(field);field="";}else if(c==='\n'||c==='\r'){if(field!==""||row.length){row.push(field);rows.push(row);row=[];field="";}if(c==='\r'&&text[i+1]==='\n')i++;}else field+=c;}
+    i++;
+  }
+  if(field!==""||row.length){row.push(field);rows.push(row);}
+  return rows;
+}
+function normDate(s){s=(s||"").trim();let m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);if(m){let y=m[3];if(y.length===2)y="20"+y;return y+"-"+m[1].padStart(2,"0")+"-"+m[2].padStart(2,"0");}m=s.match(/^(\d{4})-(\d{2})-(\d{2})/);if(m)return m[1]+"-"+m[2]+"-"+m[3];return null;}
+function incClassify(n){n=(n||"").toLowerCase();return /paycheck|payroll|umbc|direct dep/.test(n)?"earned":/zelle.*from|support|venmo.*from/.test(n)?"support":/atm cash deposit|cash deposit|remote.*deposit|check/.test(n)?"cashin":"refund";}
+function dedupeKey(date,signed,desc){return date+"|"+Math.round(signed*100)+"|"+(desc||"").toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,12);}
+function importCSV(input){const f=input.files[0];if(!f)return;input.value="";const r=new FileReader();r.onload=()=>{try{parseImport(r.result);}catch(e){toast("Couldn't read that CSV");}};r.readAsText(f);}
+function parseImport(text){
+  const rows=parseCSV(text).filter(r=>r.length>1&&r.some(x=>x.trim()));
+  if(rows.length<2){toast("That CSV looks empty");return;}
+  const h=rows[0].map(x=>x.toLowerCase().trim());
+  const find=(...ks)=>h.findIndex(x=>ks.some(k=>x.includes(k)));
+  const C={date:find("date"),desc:find("description","name","memo","payee"),amount:find("amount"),debit:find("debit","withdrawal"),credit:find("credit","deposit"),balance:find("balance"),type:find(" type","details")};
+  if(C.date<0||(C.amount<0&&C.debit<0&&C.credit<0)){toast("Couldn't find date/amount columns in that CSV");return;}
+  const cnt={};DB.txns.forEach(t=>{const k=dedupeKey(t.date,t.type==="income"?t.amount:-t.amount,t.note);cnt[k]=(cnt[k]||0)+1;});
+  const parsed=[];let dup=0,bal=null,balDate="";
+  for(let i=1;i<rows.length;i++){
+    const r=rows[i];const date=normDate(r[C.date]);if(!date)continue;
+    let amt;
+    if(C.amount>=0)amt=parseFloat((r[C.amount]||"").replace(/[^0-9.\-]/g,""));
+    else{const dv=Math.abs(parseFloat((r[C.debit]||"0").replace(/[^0-9.\-]/g,""))||0),cv=parseFloat((r[C.credit]||"0").replace(/[^0-9.\-]/g,""))||0;amt=cv-dv;}
+    if(isNaN(amt)||amt===0)continue;
+    const desc=(r[C.desc]||"").trim(),type=C.type>=0?(r[C.type]||""):"";
+    if(C.balance>=0){const b=parseFloat((r[C.balance]||"").replace(/[^0-9.\-]/g,""));if(!isNaN(b)&&date>balDate){bal=b;balDate=date;}}
+    const key=dedupeKey(date,amt,desc);
+    if(cnt[key]>0){cnt[key]--;dup++;continue;}
+    let ty,cat;
+    if(amt>0){ty="income";cat=incClassify(desc);}
+    else{ty="expense";cat=/atm|zelle payment to|partnerfi/i.test(desc)||/atm|partnerfi/i.test(type)?"transfer":(autoCategorize(desc)||"other");}
+    parsed.push({date,type:ty,amount:Math.round(Math.abs(amt)*100)/100,cat,note:desc,source:"bank"});
+  }
+  _pendingImport={txns:parsed,dup,balance:bal};
+  renderImportPreview();
+}
+function renderImportPreview(){
+  const el=document.getElementById("csvPreview"),p=_pendingImport;if(!el)return;
+  if(!p){el.innerHTML="";return;}
+  const n=p.txns.length;
+  if(!n){el.innerHTML=`<div class="advice good">Nothing new — all ${p.dup} transaction${p.dup!==1?"s":""} in that file are already imported. ✅</div>`;_pendingImport=null;return;}
+  const rowHtml=t=>{const ic=t.type==="income"?(incCatMap[t.cat]||incCatMap.refund):(catMap[t.cat]||catMap.other);return `<div class="txn"><div class="ic">${ic.icon}</div><div class="info"><div class="t">${escapeHtml(displayName(t.note))}</div><div class="s">${ic.name} · ${fmtDate(t.date)}</div></div><div class="amt ${t.type==="income"?"income":""}">${t.type==="income"?"+":"-"}${money(t.amount)}</div></div>`;};
+  el.innerHTML=`<div class="hint"><b>${n}</b> new · ${p.dup} duplicate${p.dup!==1?"s":""} skipped${p.balance!=null?` · balance will be set to <b>${money(p.balance)}</b>`:""}</div>
+    ${p.txns.slice(0,12).map(rowHtml).join("")}${n>12?`<div class="hint" style="text-align:center;margin-top:6px">…and ${n-12} more</div>`:""}
+    <div class="split" style="margin-top:10px">
+      <button class="btn" style="flex:1" onclick="confirmImport()">Import ${n}</button>
+      <button class="btn ghost" style="flex:1" onclick="cancelImport()">Cancel</button>
+    </div>`;
+}
+function confirmImport(){
+  const p=_pendingImport;if(!p||!p.txns.length)return;
+  const base=Date.now();p.txns.forEach((t,i)=>{t.id=base+i;DB.txns.push(t);});
+  if(p.balance!=null)DB.settings.startBal+=(p.balance-bankBalance()); // re-anchor bank balance to CSV's latest posted balance
+  _tokCache=null;save();
+  document.getElementById("csvPreview").innerHTML=`<div class="advice good">Imported ${p.txns.length} transaction${p.txns.length>1?"s":""}. ✅</div>`;
+  _pendingImport=null;
+  renderExpenses();renderDash();renderBudget();renderNoteSuggest();toast("Imported "+p.txns.length);
+}
+function cancelImport(){_pendingImport=null;document.getElementById("csvPreview").innerHTML="";}
 
 /* ===================== NAV + INIT ===================== */
 function go(v){
