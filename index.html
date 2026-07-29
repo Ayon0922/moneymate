@@ -212,6 +212,10 @@
   <!-- ANALYTICS -->
   <section class="view" id="v-ana">
     <div class="card">
+      <h2>💎 Net Worth</h2>
+      <div id="netWorth"></div>
+    </div>
+    <div class="card">
       <h2>📅 This Month at a Glance</h2>
       <div id="monthSummary"></div>
     </div>
@@ -491,7 +495,7 @@ const INCOME_CATS=[
 ];
 const incCatMap=Object.fromEntries(INCOME_CATS.map(c=>[c.id,c]));
 const DEFAULT={
-  txns:[], splits:[], stubs:[], paychecks:[], goals:[], taxItems:[],
+  txns:[], splits:[], stubs:[], paychecks:[], goals:[], taxItems:[], accounts:[],
   budgets:{food:200,groceries:250,goingout:150,transport:80,bills:400,shopping:100,health:50,other:60},
   settings:{startBal:0,cashBal:0,rate:16,freq:26,filing:"single",state:"MD",stateRate:0,local:2.83,intl:true,fedStdElig:false,treaty:0}
 };
@@ -506,7 +510,7 @@ function load(){
       settings:{...DEFAULT.settings,...(d.settings||{})},
       budgets:{...DEFAULT.budgets,...(d.budgets||{})},
       goals:(d.goals&&d.goals.length)?d.goals:(d.goal&&d.goal.target?[{id:Date.now(),...d.goal}]:[]),
-      splits:d.splits||[], stubs:d.stubs||[], paychecks:d.paychecks||[], taxItems:d.taxItems||[]};
+      splits:d.splits||[], stubs:d.stubs||[], paychecks:d.paychecks||[], taxItems:d.taxItems||[], accounts:d.accounts||[]};
   }catch(e){return structuredClone(DEFAULT);}
 }
 function save(){localStorage.setItem("moneymate",JSON.stringify(DB));}
@@ -682,7 +686,53 @@ function renderDailyTrends(){
     <div class="trend" style="height:90px">${bars}</div>
     <div class="advice ${runway<21?"warn":"good"}" style="margin-top:10px">At <b>${money0(burn)}/day</b>, your ${money0(bal)} total lasts about <b>${runway===Infinity?"—":runway+" days"}</b>. To glide to month-end, keep spending under <b>${money0(safePerDay)}/day</b> for the remaining ${daysLeft} day${daysLeft>1?"s":""}.</div>`;
 }
+function netWorth(){
+  const assets=(DB.accounts||[]).filter(a=>a.type!=="liability").reduce((s,a)=>s+(+a.balance||0),0);
+  const liab=(DB.accounts||[]).filter(a=>a.type==="liability").reduce((s,a)=>s+(+a.balance||0),0);
+  return {liquid:totalBalance(),assets,liab,total:totalBalance()+assets-liab};
+}
+function renderNetWorth(){
+  const el=document.getElementById("netWorth");if(!el)return;
+  const nw=netWorth();
+  const now=new Date(),pts=[];
+  for(let i=5;i>=0;i--){const d=new Date(now.getFullYear(),now.getMonth()-i,1),key=d.toISOString().slice(0,7);
+    const after=DB.txns.filter(t=>t.date.slice(0,7)>key).reduce((s,t)=>s+(t.type==="income"?t.amount:-t.amount),0);
+    pts.push({label:d.toLocaleDateString("en-US",{month:"short"}),val:(totalBalance()-after)+nw.assets-nw.liab});}
+  const vals=pts.map(p=>p.val),mn=Math.min(0,...vals),mx=Math.max(...vals,1),range=(mx-mn)||1;
+  const bars=pts.map(p=>`<div class="col"><div class="vl">${money0(p.val)}</div><div class="bx" style="height:${Math.max(3,(p.val-mn)/range*100)}%;background:${p.val>=0?"linear-gradient(180deg,var(--good),#059669)":"var(--bad)"}"></div><div class="lb">${p.label}</div></div>`).join("");
+  const acc=(DB.accounts||[]);
+  el.innerHTML=`
+    <div style="text-align:center;padding:6px 0 10px"><div class="lbl" style="color:var(--muted);font-size:13px">Total net worth</div>
+      <div style="font-size:34px;font-weight:800;color:${nw.total>=0?"var(--good)":"var(--bad)"}">${money(nw.total)}</div>
+      <div class="muted" style="font-size:12px">assets ${money0(nw.liquid+nw.assets)} · debts ${money0(nw.liab)}</div></div>
+    <div class="trend" style="height:104px">${bars}</div>
+    <div class="muted" style="font-size:11px;margin:6px 0 10px;text-align:center">Net worth over time (liquid balance + your accounts)</div>
+    <div class="split-item"><div class="ic">🏦</div><div class="who"><div class="n">Bank</div><div class="m">live balance</div></div><div class="amt">${money(bankBalance())}</div></div>
+    <div class="split-item"><div class="ic">💵</div><div class="who"><div class="n">Cash</div><div class="m">live balance</div></div><div class="amt">${money(cashBalance())}</div></div>
+    ${acc.map(a=>`<div class="split-item"><div class="ic">${a.type==="liability"?"💳":"📈"}</div>
+      <div class="who"><div class="n">${escapeHtml(a.name)}</div><div class="m">${a.type==="liability"?"debt":"asset"}</div></div>
+      <input type="number" value="${a.balance}" style="width:96px;padding:5px 8px;font-size:13px" onchange="setAccountBal(${a.id},this.value)">
+      <button class="del" onclick="delAccount(${a.id})">×</button></div>`).join("")}
+    <label style="margin-top:10px">Add an account (savings, investment, credit card…)</label>
+    <div class="split">
+      <div><input id="acName" type="text" placeholder="Name"></div>
+      <div><select id="acType"><option value="asset">Asset (savings, investments)</option><option value="liability">Debt (credit card, loan)</option></select></div>
+    </div>
+    <div class="split" style="margin-top:8px">
+      <div><input id="acBal" type="number" inputmode="decimal" step="0.01" placeholder="$ balance"></div>
+      <div><button class="btn sm" style="width:100%" onclick="addAccount()">Add account</button></div>
+    </div>`;
+}
+function addAccount(){
+  const name=document.getElementById("acName").value.trim(),type=document.getElementById("acType").value,bal=parseFloat(document.getElementById("acBal").value)||0;
+  if(!name)return toast("Enter an account name");
+  (DB.accounts=DB.accounts||[]).push({id:Date.now(),name,type,balance:Math.round(bal*100)/100});
+  save();renderNetWorth();renderDash();toast("Account added");
+}
+function delAccount(id){DB.accounts=(DB.accounts||[]).filter(a=>a.id!==id);save();renderNetWorth();renderDash();}
+function setAccountBal(id,v){const a=(DB.accounts||[]).find(x=>x.id===id);if(a){a.balance=Math.round((+v||0)*100)/100;save();renderNetWorth();}}
 function renderAnalytics(){
+  renderNetWorth();
   renderMonthSummary();
   renderDailyTrends();
   const months=monthlyTotals(6);
@@ -739,13 +789,30 @@ function toggleItems(kind){
   const total=list.reduce((s,t)=>s+t.amount,0);
   el.innerHTML=(list.length?`<div class="hint">${list.length} ${kind==="inc"?"income":"expense"} item${list.length>1?"s":""} · ${money0(total)} total</div>`+list.map(txnRow).join(""):`<div class="empty">No ${kind==="inc"?"income":"expenses"} this month.</div>`);
 }
+let _mdKey=null,_mdShown=null;
 function showMonthDetail(key){
   const el=document.getElementById("monthDetail");if(!el)return;
-  const rows=SPEND_CATS.map(c=>({c,sp:DB.txns.filter(t=>t.type==="expense"&&t.cat===c.id&&t.date.slice(0,7)===key).reduce((s,t)=>s+t.amount,0)})).filter(x=>x.sp>0).sort((a,b)=>b.sp-a.sp);
+  _mdKey=key;_mdShown=null;
+  const monthTx=DB.txns.filter(t=>t.date.slice(0,7)===key);
+  const inc=monthTx.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);
+  const spent=monthTx.filter(t=>t.type==="expense"&&t.cat!=="transfer").reduce((s,t)=>s+t.amount,0);
+  const rows=SPEND_CATS.map(c=>({c,sp:monthTx.filter(t=>t.type==="expense"&&t.cat===c.id).reduce((s,t)=>s+t.amount,0)})).filter(x=>x.sp>0).sort((a,b)=>b.sp-a.sp);
   const tot=rows.reduce((s,x)=>s+x.sp,0);
   const label=new Date(key+"-01T00:00").toLocaleDateString("en-US",{month:"long",year:"numeric"});
-  el.innerHTML=`<div class="hint" style="margin-top:8px"><b>${label}</b> — spent ${money0(tot)}:</div>`+
-    (rows.length?rows.map(x=>`<div class="catbar"><div class="r1"><span>${x.c.icon} ${x.c.name}</span><span>${money0(x.sp)} · ${(x.sp/tot*100).toFixed(0)}%</span></div><div class="track"><div class="fill" style="width:${x.sp/tot*100}%;background:${x.c.color}"></div></div></div>`).join(""):`<div class="empty">No spending that month.</div>`);
+  el.innerHTML=`<div class="hint" style="margin-top:8px"><b>${label}</b> — ${money0(inc)} in · ${money0(spent)} spent</div>`+
+    (rows.length?rows.map(x=>`<div class="catbar"><div class="r1"><span>${x.c.icon} ${x.c.name}</span><span>${money0(x.sp)} · ${tot>0?(x.sp/tot*100).toFixed(0):0}%</span></div><div class="track"><div class="fill" style="width:${tot>0?x.sp/tot*100:0}%;background:${x.c.color}"></div></div></div>`).join(""):`<div class="empty">No spending that month.</div>`)+
+    `<div class="split" style="margin-top:8px">
+      <button class="btn ghost sm" style="flex:1" onclick="toggleMonthItems('inc')">Income items</button>
+      <button class="btn ghost sm" style="flex:1" onclick="toggleMonthItems('exp')">Expense items</button>
+    </div><div id="mdItems" style="margin-top:8px"></div>`;
+}
+function toggleMonthItems(kind){
+  const el=document.getElementById("mdItems");if(!el||!_mdKey)return;
+  if(_mdShown===kind){_mdShown=null;el.innerHTML="";return;}
+  _mdShown=kind;
+  const list=DB.txns.filter(t=>t.date.slice(0,7)===_mdKey&&t.type===(kind==="inc"?"income":"expense")).sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id);
+  const total=list.reduce((s,t)=>s+t.amount,0);
+  el.innerHTML=list.length?`<div class="hint">${list.length} ${kind==="inc"?"income":"expense"} item${list.length>1?"s":""} · ${money0(total)} total</div>`+list.map(txnRow).join(""):`<div class="empty">No ${kind==="inc"?"income":"expenses"} that month.</div>`;
 }
 
 /* ===================== RECURRING / SUBSCRIPTIONS ===================== */
