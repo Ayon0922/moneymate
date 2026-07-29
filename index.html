@@ -631,6 +631,20 @@ function renderMonthSummary(){
     </div>
     <div class="advice ${net>=0?"good":"warn"}">Your balance ${net>=0?"grew":"dropped"} <b>${money0(Math.abs(net))}</b> this month = ${money0(totalIn)} in − ${money0(spent)} spent − ${money0(transfers)} transfers.${earned>0?` Of money in, <b>${money0(earned)}</b> was earned pay${otherIn>0?`, ${money0(otherIn)} was top-ups (family/cash/refunds)`:""}.`:otherIn>0?` All ${money0(otherIn)} in was top-ups (family/cash/refunds), not earned pay.`:""}${top&&top.sp>0?` Top spend: ${top.c.icon} ${top.c.name} (${money0(top.sp)}).`:""}</div>`;
 }
+function donutSVG(data,tot,label){
+  const size=168,thick=26,r=(size-thick)/2,cx=size/2,cy=size/2,C=2*Math.PI*r;
+  let off=0;
+  const segs=data.filter(d=>d.value>0).map(d=>{
+    const len=d.value/tot*C;
+    const s=`<circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${d.color}" stroke-width="${thick}" stroke-dasharray="${len.toFixed(2)} ${(C-len).toFixed(2)}" stroke-dashoffset="${(-off).toFixed(2)}" transform="rotate(-90 ${cx} ${cy})"/>`;
+    off+=len;return s;
+  }).join("");
+  return `<svg viewBox="0 0 ${size} ${size}" width="152" height="152" style="display:block;margin:0 auto 12px">
+    <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="var(--bg2)" stroke-width="${thick}"/>
+    ${segs}
+    <text x="${cx}" y="${cy-1}" text-anchor="middle" fill="var(--text)" font-size="22" font-weight="800">${money0(tot)}</text>
+    <text x="${cx}" y="${cy+18}" text-anchor="middle" fill="var(--muted)" font-size="11">${label||""}</text></svg>`;
+}
 function renderDailyTrends(){
   const el=document.getElementById("dailyTrends");if(!el)return;
   const now=new Date(),iso=d=>d.toISOString().slice(0,10);
@@ -687,7 +701,8 @@ function renderAnalytics(){
   // category breakdown this month
   const rows=SPEND_CATS.map(c=>({c,sp:spentThisMonth(c.id)})).filter(x=>x.sp>0).sort((a,b)=>b.sp-a.sp);
   const tot=rows.reduce((s,x)=>s+x.sp,0);
-  document.getElementById("catBreak").innerHTML=rows.length?rows.map(x=>`
+  const donut=rows.length?donutSVG(rows.map(x=>({value:x.sp,color:x.c.color})),tot,"spent"):"";
+  document.getElementById("catBreak").innerHTML=rows.length?donut+rows.map(x=>`
     <div class="catbar"><div class="r1"><span>${x.c.icon} ${x.c.name}</span><span>${money0(x.sp)} · ${(x.sp/tot*100).toFixed(0)}%</span></div>
     <div class="track"><div class="fill" style="width:${x.sp/tot*100}%;background:${x.c.color}"></div></div></div>`).join("")
     :`<div class="empty">No spending logged this month yet.</div>`;
@@ -1195,9 +1210,38 @@ function noteMemory(){
   return m;
 }
 function bestCat(e){return Object.entries(e.cats).sort((a,b)=>b[1]-a[1])[0][0];}
+const CAT_KEYWORDS=[
+ ["food",["starbucks","dunkin","mcdonald","taco bell","chipotle","chick","shake shack","domino","panda","subway","pizza","cava","panera","wendy","five guys","kfc","popeye","wawa","sheetz","royal farm","cafe","restaurant","grill","kitchen","deli","sushi","thai","halal","biryani","uber eats","ubereats","doordash","grubhub","canteen","bakery"]],
+ ["groceries",["giant","walmart","target","aldi","lidl","weis","safeway","costco","sam's","dollar tree","food lion","whole foods","trader joe","h mart","patel","grocer","lotte","shoppers"]],
+ ["transport",["uber","lyft","shell","exxon"," bp ","marathon","sunoco"," gas","mta","transit","parking","amtrak","megabus","toll","e-zpass","ezpass","citgo","charmpass","mva","auto care","muffler","tire"]],
+ ["bills",["apple.com","google","spotify","netflix","hulu","disney","prime","adobe","grammarly","icloud","t-mobile","tmobile","verizon","at&t","xfinity","comcast","insurance","rent","membership","chatgpt","openai","claude","anthropic","cursor","umbc"]],
+ ["shopping",["amazon","amzn","ebay","nike","shein","best buy","gamestop","nintendo","playstation","steam","zara","uniqlo","temu","h&m","midasbuy","eldorado","perfumebox","bookstore","jomashop"]],
+ ["goingout",["liquor","tavern","cinema","cinemark"," amc","brewing","lounge","hookah","ticket","bar ","tobacco","events"]],
+ ["health",["cvs","walgreen","rite aid","pharmacy","dental","clinic","hospital","gym","fitness","badminton"]],
+];
+let _tokCache=null;
+function tokenCatMap(){
+  if(_tokCache)return _tokCache;
+  const m={};
+  DB.txns.filter(t=>t.type==="expense"&&t.note&&t.cat&&t.cat!=="transfer"&&t.cat!=="other").forEach(t=>{
+    (t.note.toLowerCase().match(/[a-z]{3,}/g)||[]).forEach(tok=>{(m[tok]=m[tok]||{})[t.cat]=(m[tok][t.cat]||0)+1;});
+  });
+  return _tokCache=m;
+}
+function autoCategorize(note){
+  const n=(note||"").toLowerCase().trim();if(!n)return null;
+  const mem=noteMemory();if(mem[note])return bestCat(mem[note]);          // exact merchant seen before
+  const m=tokenCatMap(),score={};                                          // learned from your history
+  (n.match(/[a-z]{3,}/g)||[]).forEach(tok=>{if(m[tok])for(const c in m[tok])score[c]=(score[c]||0)+m[tok][c];});
+  const best=Object.entries(score).sort((a,b)=>b[1]-a[1])[0];
+  if(best&&best[1]>=2)return best[0];
+  for(const [cat,kws] of CAT_KEYWORDS){if(kws.some(k=>n.includes(k)))return cat;}  // built-in knowledge
+  return null;
+}
 function autoCat(){
-  const m=noteMemory(),n=document.getElementById("eNote").value.trim();
-  if(m[n]&&document.getElementById("eType").value==="expense")document.getElementById("eCat").value=bestCat(m[n]);
+  if(document.getElementById("eType").value!=="expense")return;
+  const c=autoCategorize(document.getElementById("eNote").value.trim());
+  if(c)document.getElementById("eCat").value=c;
 }
 function renderNoteSuggest(){
   const m=noteMemory();
@@ -1224,10 +1268,10 @@ function addTxn(){
     cat:document.getElementById("eCat").value,note:document.getElementById("eNote").value.trim(),
     source:document.getElementById("eSource").value,
     date:document.getElementById("eDate").value||todayStr()});
-  save();document.getElementById("eAmt").value="";document.getElementById("eNote").value="";
+  _tokCache=null;save();document.getElementById("eAmt").value="";document.getElementById("eNote").value="";
   renderExpenses();renderDash();renderBudget();renderNoteSuggest();toast("Added");
 }
-function delTxn(id){DB.txns=DB.txns.filter(t=>t.id!==id);save();renderExpenses();renderDash();renderBudget();}
+function delTxn(id){DB.txns=DB.txns.filter(t=>t.id!==id);_tokCache=null;save();renderExpenses();renderDash();renderBudget();}
 function setFilter(id){activeFilter=id;renderExpenses();}
 function setBudget(id,v){DB.budgets[id]=Math.max(0,+v||0);save();renderBudget();renderDash();}
 function calcPay(){
