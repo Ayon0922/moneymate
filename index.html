@@ -799,7 +799,8 @@ function showMonthDetail(key){
   const rows=SPEND_CATS.map(c=>({c,sp:monthTx.filter(t=>t.type==="expense"&&t.cat===c.id).reduce((s,t)=>s+t.amount,0)})).filter(x=>x.sp>0).sort((a,b)=>b.sp-a.sp);
   const tot=rows.reduce((s,x)=>s+x.sp,0);
   const label=new Date(key+"-01T00:00").toLocaleDateString("en-US",{month:"long",year:"numeric"});
-  el.innerHTML=`<div class="hint" style="margin-top:8px"><b>${label}</b> — ${money0(inc)} in · ${money0(spent)} spent</div>`+
+  const donut=rows.length?donutSVG(rows.map(x=>({value:x.sp,color:x.c.color})),tot,"spent"):"";
+  el.innerHTML=`<div class="hint" style="margin-top:8px"><b>${label}</b> — ${money0(inc)} in · ${money0(spent)} spent</div>`+donut+
     (rows.length?rows.map(x=>`<div class="catbar"><div class="r1"><span>${x.c.icon} ${x.c.name}</span><span>${money0(x.sp)} · ${tot>0?(x.sp/tot*100).toFixed(0):0}%</span></div><div class="track"><div class="fill" style="width:${tot>0?x.sp/tot*100:0}%;background:${x.c.color}"></div></div></div>`).join(""):`<div class="empty">No spending that month.</div>`)+
     `<div class="split" style="margin-top:8px">
       <button class="btn ghost sm" style="flex:1" onclick="toggleMonthItems('inc')">Income items</button>
