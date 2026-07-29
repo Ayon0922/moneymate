@@ -1137,10 +1137,42 @@ function renderDash(){
   const rec=DB.txns.slice().sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id).slice(0,5);
   document.getElementById("recent").innerHTML=rec.length?rec.map(txnRow).join(""):`<div class="empty">No transactions yet. Add one from Expenses.</div>`;
 }
+const MERCHANT_ALIASES=[
+ [/amazon luna/i,"Amazon Luna"],[/amazon|amzn/i,"Amazon"],[/apple\.?com|itunes/i,"Apple"],[/chipotle/i,"Chipotle"],
+ [/uber\s*\*?\s*eats|ubereats/i,"Uber Eats"],[/uber\s*\*?\s*one/i,"Uber One"],[/\bubr\b|uber/i,"Uber"],[/lyft/i,"Lyft"],
+ [/cinemark/i,"Cinemark"],[/\bamc\b/i,"AMC"],
+ [/starbucks/i,"Starbucks"],[/dunkin/i,"Dunkin'"],[/mcdonald/i,"McDonald's"],[/taco bell/i,"Taco Bell"],
+ [/chick.?fil|chickfil/i,"Chick-fil-A"],[/panda/i,"Panda Express"],[/popeye/i,"Popeyes"],[/domino/i,"Domino's"],
+ [/shake shack/i,"Shake Shack"],[/wawa/i,"Wawa"],[/royal farm/i,"Royal Farms"],[/canteen/i,"Canteen"],[/dd\/br|baskin/i,"Dunkin'"],
+ [/netflix/i,"Netflix"],[/spotify/i,"Spotify"],[/hulu/i,"Hulu"],[/disney/i,"Disney+"],[/grammarly/i,"Grammarly"],
+ [/midasbuy/i,"Midasbuy"],[/eldorado/i,"Eldorado.gg"],[/\bsteam\b/i,"Steam"],[/nintendo/i,"Nintendo"],[/playstation/i,"PlayStation"],
+ [/walmart|wal-mart/i,"Walmart"],[/target/i,"Target"],[/giant/i,"Giant"],[/costco/i,"Costco"],[/dollar tree/i,"Dollar Tree"],
+ [/whole foods/i,"Whole Foods"],[/trader joe/i,"Trader Joe's"],[/\bcvs\b/i,"CVS"],[/walgreen/i,"Walgreens"],[/high'?s\b/i,"High's"],
+ [/nike/i,"Nike"],[/zara/i,"Zara"],[/uniqlo/i,"Uniqlo"],[/perfumebox/i,"Perfumebox"],[/jomashop/i,"Jomashop"],[/ralph lauren/i,"Ralph Lauren"],
+ [/paypal/i,"PayPal"],[/cash app/i,"Cash App"],[/venmo/i,"Venmo"],[/liquor|ridgeway/i,"Liquor store"],[/tobacco/i,"Tobacco"],
+ [/bookstore/i,"Bookstore"],[/anthropic|claude/i,"Claude"],[/openai|chatgpt/i,"ChatGPT"],[/cursor/i,"Cursor"],
+ [/auto care|muffler|\btire\b/i,"Auto repair"],[/mva|state highway|toll|e.?zpass/i,"DMV / tolls"],[/atul/i,"Atul Bakery"],[/kabab|kabob/i,"Kabab Hut"],
+ [/umbc/i,"UMBC"],
+];
+function displayName(note){
+  const n=note||"";
+  const z=n.match(/zelle payment (to|from)\s+(.+)/i);
+  if(z)return "Zelle · "+z[2].split(/\s+/).slice(0,2).join(" ");
+  if(/\batm\b/i.test(n))return /deposit/i.test(n)?"ATM deposit":/withdraw/i.test(n)?"ATM cash out":"ATM";
+  if(/remote.*deposit|check deposit/i.test(n))return "Check deposit";
+  for(const [rx,name] of MERCHANT_ALIASES)if(rx.test(n))return name;
+  let d=n.replace(/^(tst\s*\*|sq\s*\*|pp\*+|paypal\s*\*|ppp\*|ck\*|pos debit|recurring\s+)/i,"") // strip POS-processor prefixes
+         .replace(/\*.*/,"")            // drop ids after a remaining *
+         .replace(/#?\d{3,}\S*/g,"")    // drop long numbers/ids
+         .replace(/\b[A-Za-z]{2}\s*$/,"") // drop trailing state code
+         .replace(/\s+/g," ").trim();
+  d=d.split(/\s+/).slice(0,3).join(" ");
+  return d||n;
+}
 function txnRow(t){
   const isInc=t.type==="income",ic=isInc?(incCatMap[t.cat]||incCatMap.refund):(catMap[t.cat]||catMap.other),sign=isInc?"+":"-";
   return `<div class="txn"><div class="ic">${ic.icon}</div>
-    <div class="info"><div class="t">${escapeHtml(t.note||ic.name)}</div>
+    <div class="info"><div class="t">${escapeHtml(displayName(t.note)||ic.name)}</div>
     <div class="s">${ic.name} · ${fmtDate(t.date)}</div></div>
     <div class="amt ${isInc?"income":""}">${sign}${money(t.amount)}</div>
     <button class="del" onclick="delTxn(${t.id})">×</button></div>`;}
@@ -1250,7 +1282,7 @@ function renderNoteSuggest(){
   QNAMES=names.slice(0,6);
   document.getElementById("quickAdd").innerHTML=QNAMES.length
     ?`<div class="muted" style="font-size:11px;margin:0 0 6px">⚡ Quick add (tap to prefill):</div>
-      <div class="chips">${QNAMES.map((n,i)=>`<div class="chip" onclick="quickFill(${i})">${escapeHtml(n.length>18?n.slice(0,18)+"…":n)}</div>`).join("")}</div>`
+      <div class="chips">${QNAMES.map((n,i)=>`<div class="chip" onclick="quickFill(${i})">${escapeHtml(displayName(n))}</div>`).join("")}</div>`
     :"";
 }
 function quickFill(i){
