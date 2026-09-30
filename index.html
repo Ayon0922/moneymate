@@ -1544,7 +1544,7 @@ function renderPaychecks(){
 function saveSettings(){
   const s=DB.settings;
   const desiredBal=parseFloat(document.getElementById("sBal").value);
-  if(!isNaN(desiredBal)) s.startBal+=(desiredBal-bankBalance()); // field = current BANK balance; back-solve anchor
+  if(!isNaN(desiredBal)&&Math.abs(desiredBal-bankBalance())>0.004){s.startBal+=(desiredBal-bankBalance());s.balSetAt=todayStr();} // field = current BANK balance; back-solve anchor
   const desiredCash=parseFloat(document.getElementById("sCash").value);
   if(!isNaN(desiredCash)) s.cashBal=(s.cashBal||0)+(desiredCash-cashBalance()); // field = current CASH; back-solve
   s.rate=parseFloat(document.getElementById("sRate").value)||16;
@@ -1699,7 +1699,8 @@ function stageImport(items,meta){
   // Only re-anchor the balance if this file is at least as recent as the bank data we already have
   const bankDates=DB.txns.filter(isBank).map(t=>t.date).sort();
   const lastHave=bankDates.length?bankDates[bankDates.length-1]:"";
-  const anchor=meta.balance!=null&&(meta.balDate||"")>=lastHave;
+  // ...and never over a balance you typed in yourself more recently than the file's date
+  const anchor=meta.balance!=null&&(meta.balDate||"")>=lastHave&&(meta.balDate||"")>=(DB.settings.balSetAt||"");
   // Gap detection: statement starts well after the last bank transaction we have
   let gap=null;
   const firstNew=items.length?items.map(i=>i.date).sort()[0]:null,from=meta.periodStart||firstNew;
@@ -1717,7 +1718,7 @@ function renderImportPreview(){
   if(!n){el.innerHTML=head+`<div class="advice good">Nothing new — all ${p.dup} transaction${p.dup!==1?"s":""} in that file are already imported. ✅</div>`;_pendingImport=null;return;}
   const tr=p.txns.filter(t=>t.type==="expense"&&t.cat==="transfer"&&OWN_TRANSFER_RX.test(t.note)).reduce((s,t)=>s+t.amount,0);
   const rowHtml=t=>{const ic=t.type==="income"?(incCatMap[t.cat]||incCatMap.refund):(catMap[t.cat]||catMap.other);return `<div class="txn"><div class="ic">${ic.icon}</div><div class="info"><div class="t">${escapeHtml(displayName(t.note))}</div><div class="s">${ic.name} · ${fmtDate(t.date)}</div></div><div class="amt ${t.type==="income"?"income":""}">${t.type==="income"?"+":"-"}${money(t.amount)}</div></div>`;};
-  el.innerHTML=head+gapHtml+`<div class="hint"><b>${n}</b> new · ${p.dup} duplicate${p.dup!==1?"s":""} skipped${p.balance!=null?` · balance will be set to <b>${money(p.balance)}</b>`:""}${p.staleBal?" · older than your latest data, so your balance won't change":""}</div>
+  el.innerHTML=head+gapHtml+`<div class="hint"><b>${n}</b> new · ${p.dup} duplicate${p.dup!==1?"s":""} skipped${p.balance!=null?` · balance will be set to <b>${money(p.balance)}</b>`:""}${p.staleBal?" · older than your latest data or the balance you set, so your balance won't change":""}</div>
     ${tr>0?`<div class="hint">🔄 ${money(tr)} of card payments / investing moved to Cash/Transfer so it isn't counted as spending.</div>`:""}
     ${p.txns.slice(0,12).map(rowHtml).join("")}${n>12?`<div class="hint" style="text-align:center;margin-top:6px">…and ${n-12} more</div>`:""}
     <div class="split" style="margin-top:10px">
