@@ -132,6 +132,7 @@
   .empty{text-align:center;color:var(--muted);padding:26px 10px;font-size:14px}
   .split{display:flex;gap:10px}.split>*{flex:1}
   .hint{font-size:12px;color:var(--muted);margin-top:6px;line-height:1.4}
+  .sync-badge{font-size:11px;margin-left:6px;cursor:pointer;white-space:nowrap}.sync-badge.err{color:var(--bad)}.sync-badge.ok{color:var(--good)}.sync-badge.pending,.sync-badge.busy{color:var(--warn)}
   .toggle{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line)}
   .toggle:last-of-type{border-bottom:none}
   .toggle .tl{font-size:14px}.toggle .td{font-size:11px;color:var(--muted)}
@@ -152,7 +153,7 @@
   <header>
     <div>
       <h1>Money<span class="dot">Mate</span></h1>
-      <div class="sub" id="dateSub"></div>
+      <div class="sub"><span id="dateSub"></span> <span id="syncBadge" class="sync-badge" onclick="go('set')"></span></div>
     </div>
     <button class="gear" onclick="go('set')">⚙️</button>
   </header>
@@ -454,9 +455,10 @@
       <div class="hint">Bangladesh has no US tax treaty → leave 0. (China would be 5000, etc.)</div>
       <button class="btn" onclick="saveSettings()">Save Settings</button>
     </div>
+    <div class="card" id="syncCard"></div>
     <div class="card">
       <h2>Data</h2>
-      <div class="muted" style="font-size:13px">Stored privately on this device.</div>
+      <div class="muted" style="font-size:13px">Stored on this device. Turn on Sync above to share it with your other devices.</div>
       <input id="importFile" type="file" accept=".json,application/json" style="display:none" onchange="importData(this)">
       <button class="btn" onclick="document.getElementById('importFile').click()">Import backup (JSON)</button>
       <button class="btn ghost" onclick="exportData()">Export backup (JSON)</button>
@@ -518,7 +520,13 @@ function load(){
       splits:d.splits||[], stubs:d.stubs||[], paychecks:d.paychecks||[], taxItems:d.taxItems||[], accounts:d.accounts||[], cards:d.cards||[]};
   }catch(e){return structuredClone(DEFAULT);}
 }
-function save(){localStorage.setItem("moneymate",JSON.stringify(DB));}
+function save(){
+  if(typeof trackDeletes==="function")trackDeletes();
+  const s=JSON.stringify(DB);
+  if(typeof _lastSavedStr!=="undefined"&&s===_lastSavedStr)return; // nothing changed → nothing to sync
+  try{localStorage.setItem("moneymate",s);}catch(e){toast("Storage full — export a backup");}
+  _lastSavedStr=s;if(typeof syncAfterSave==="function")syncAfterSave();
+}
 const money=n=>(n<0?"-$":"$")+Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
 const money0=n=>(n<0?"-$":"$")+Math.abs(Math.round(n)).toLocaleString("en-US");
 // Local-time ISO date (toISOString is UTC, which shifts evening entries to the next day in ET)
@@ -1850,6 +1858,185 @@ async function importPDF(input){
   }catch(e){el.innerHTML=`<div class="advice bad">${escapeHtml(e.message||"Couldn't read that PDF")}. Only Chase checking statements are supported right now.</div>`;}
 }
 
+/* ===================== CLOUD SYNC (encrypted, private GitHub repo) =====================
+   Data lives in one file in a PRIVATE repo, AES-256-GCM encrypted with a passphrase-derived key
+   (PBKDF2-SHA256, 250k iterations). GitHub only ever sees ciphertext.
+   Sync: pull on open/resume, push ~2s after any change. If both devices changed, records are
+   merged by id (this device wins on the same record) and deletions travel as tombstones. */
+const SYNC_KEY="moneymate_sync",SYNC_COLLS=["txns","splits","stubs","paychecks","goals","taxItems","accounts","cards"];
+let SYNC=(()=>{try{return JSON.parse(localStorage.getItem(SYNC_KEY)||"null")||{};}catch(e){return {};}})();
+let _syncTimer=null,_syncBusy=false,_syncAgain=false,_syncStatus={state:"off",msg:""},_idSnap=idSet(DB),_applyingRemote=false,_lastSavedStr=JSON.stringify(DB);
+const syncOn=()=>!!(SYNC.owner&&SYNC.repo&&SYNC.token&&SYNC.pass&&SYNC.enabled);
+function saveSyncCfg(){try{localStorage.setItem(SYNC_KEY,JSON.stringify(SYNC));}catch(e){}}
+function idSet(db){const s=new Set();for(const c of SYNC_COLLS)for(const o of (db[c]||[]))if(o&&o.id!=null)s.add(c+":"+o.id);return s;}
+// Called from save(): record deletions as tombstones, mark dirty, schedule a push
+function trackDeletes(){
+  const now=idSet(DB);
+  if(_idSnap){const ts=Date.now();for(const k of _idSnap)if(!now.has(k))(DB._tomb=DB._tomb||{})[k]=ts;}
+  _idSnap=now;
+}
+function syncAfterSave(){
+  if(_applyingRemote||!syncOn())return;
+  SYNC.dirty=true;saveSyncCfg();setSyncStatus("pending","Changes waiting to sync");
+  clearTimeout(_syncTimer);_syncTimer=setTimeout(()=>syncNow("save"),2000);
+}
+function setSyncStatus(state,msg){_syncStatus={state,msg};const b=document.getElementById("syncBadge");
+  if(b){const ic={off:"",ok:"☁️",pending:"☁️…",busy:"🔄",err:"⚠️"}[state]||"";b.textContent=ic?ic+" "+(state==="ok"?"Synced "+(SYNC.lastSync?new Date(SYNC.lastSync).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}):""):state==="err"?"Sync error":state==="busy"?"Syncing":"Unsynced"):"";b.className="sync-badge "+state;}
+  const s=document.getElementById("syncMsg");if(s)s.innerHTML=escapeHtml(msg||"");}
+// ---- crypto ----
+const _b64=u8=>{let s="";for(let i=0;i<u8.length;i+=0x8000)s+=String.fromCharCode.apply(null,u8.subarray(i,i+0x8000));return btoa(s);};
+const _unb64=b=>Uint8Array.from(atob(b.replace(/\s/g,"")),c=>c.charCodeAt(0));
+const _keyCache={};
+async function _key(pass,saltB64){const k=pass+"|"+saltB64;if(_keyCache[k])return _keyCache[k];
+  const km=await crypto.subtle.importKey("raw",new TextEncoder().encode(pass),"PBKDF2",false,["deriveKey"]);
+  return _keyCache[k]=await crypto.subtle.deriveKey({name:"PBKDF2",salt:_unb64(saltB64),iterations:250000,hash:"SHA-256"},km,{name:"AES-GCM",length:256},false,["encrypt","decrypt"]);}
+async function encryptDB(db){
+  SYNC.salt=SYNC.salt||_b64(crypto.getRandomValues(new Uint8Array(16)));
+  const iv=crypto.getRandomValues(new Uint8Array(12)),key=await _key(SYNC.pass,SYNC.salt);
+  const ct=new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv},key,new TextEncoder().encode(JSON.stringify(db))));
+  return {app:"moneymate",v:1,kdf:"PBKDF2-SHA256-250k",salt:SYNC.salt,iv:_b64(iv),ct:_b64(ct),updated:new Date().toISOString(),device:navigator.platform||""};
+}
+async function decryptEnv(env){
+  const key=await _key(SYNC.pass,env.salt);
+  try{const pt=await crypto.subtle.decrypt({name:"AES-GCM",iv:_unb64(env.iv)},key,_unb64(env.ct));SYNC.salt=env.salt;return JSON.parse(new TextDecoder().decode(pt));}
+  catch(e){throw new Error("Wrong passphrase — this device's passphrase doesn't match the cloud data.");}
+}
+// ---- GitHub contents API ----
+const ghUrl=p=>`https://api.github.com/repos/${encodeURIComponent(SYNC.owner)}/${encodeURIComponent(SYNC.repo)}/${p}`;
+async function gh(path,opt){
+  const r=await fetch(ghUrl(path),{...(opt||{}),cache:"no-store",headers:{Authorization:"Bearer "+SYNC.token,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28",...((opt&&opt.body)?{"Content-Type":"application/json"}:{})}});
+  if(r.status===401)throw new Error("GitHub rejected the token (expired or wrong).");
+  if(r.status===403)throw new Error("Token lacks access — give it Contents: Read and write on "+SYNC.repo+".");
+  return r;
+}
+const SYNC_FILE="moneymate.enc.json";
+async function ghGet(){
+  const r=await gh("contents/"+SYNC_FILE);
+  if(r.status===404){const rr=await gh("");if(rr.status===404)throw new Error(`Repo ${SYNC.owner}/${SYNC.repo} not found (check the name and that the token can see it).`);return null;}
+  if(!r.ok)throw new Error("GitHub error "+r.status);
+  const j=await r.json();let txt;
+  if(j.content)txt=new TextDecoder().decode(_unb64(j.content));
+  else{const b=await (await gh("git/blobs/"+j.sha)).json();txt=new TextDecoder().decode(_unb64(b.content));} // >1 MB files
+  return {sha:j.sha,env:JSON.parse(txt)};
+}
+async function ghPut(env,sha){
+  const body={message:"MoneyMate sync "+new Date().toISOString(),content:btoa(JSON.stringify(env))};if(sha)body.sha=sha;
+  const r=await gh("contents/"+SYNC_FILE,{method:"PUT",body:JSON.stringify(body)});
+  if(r.status===409||r.status===422)return {conflict:true};
+  if(!r.ok)throw new Error("GitHub error "+r.status+" while saving");
+  return {sha:(await r.json()).content.sha};
+}
+// ---- merge ----
+const _txKey=t=>[t.source||"bank",t.date,t.type,Math.round(t.amount*100),(t.note||"").toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,12)].join("|");
+function mergeDB(local,remote){
+  const out={...remote,...local,settings:{...remote.settings,...local.settings},budgets:{...remote.budgets,...local.budgets}};
+  const tomb={...(remote._tomb||{})};for(const [k,v] of Object.entries(local._tomb||{}))tomb[k]=Math.max(tomb[k]||0,v);
+  const cut=Date.now()-120*864e5;for(const k in tomb)if(tomb[k]<cut)delete tomb[k];
+  out._tomb=tomb;
+  for(const c of SYNC_COLLS){
+    const L=local[c]||[],R=remote[c]||[],lIds=new Set(L.map(o=>o.id));
+    let rOnly=R.filter(o=>!lIds.has(o.id));
+    if(c==="txns"){ // same statement imported on both devices before syncing → different ids, same rows
+      const rIds=new Set(R.map(o=>o.id)),cnt={};
+      L.filter(o=>!rIds.has(o.id)).forEach(t=>{const k=_txKey(t);cnt[k]=(cnt[k]||0)+1;});
+      rOnly=rOnly.filter(t=>{const k=_txKey(t);if(cnt[k]>0){cnt[k]--;return false;}return true;});
+    }
+    out[c]=L.concat(rOnly).filter(o=>!tomb[c+":"+o.id]);
+  }
+  return out;
+}
+function applyDB(d){
+  _applyingRemote=true;
+  DB={...structuredClone(DEFAULT),...d,settings:{...DEFAULT.settings,...(d.settings||{})},budgets:{...DEFAULT.budgets,...(d.budgets||{})}};
+  for(const c of SYNC_COLLS)DB[c]=DB[c]||[];
+  _tokCache=null;save();_idSnap=idSet(DB);_applyingRemote=false;
+  try{updateSourceOptions();syncSettingsUI();renderDash();renderExpenses();renderBudget();renderSplits();renderStubs();renderPaychecks();renderNoteSuggest();}catch(e){}
+}
+// ---- main loop ----
+async function syncNow(reason,mode){
+  if(!syncOn()&&!mode)return;
+  if(_syncBusy){_syncAgain=true;return;}
+  _syncBusy=true;clearTimeout(_syncTimer);setSyncStatus("busy","Syncing…");
+  try{
+    for(let attempt=0;attempt<3;attempt++){
+      const remote=await ghGet();
+      if(remote&&remote.sha!==SYNC.sha){
+        const rdb=await decryptEnv(remote.env);
+        if(mode==="replace"||(!SYNC.dirty&&mode!=="merge")){applyDB(rdb);SYNC.sha=remote.sha;SYNC.dirty=false;mode=null;break;}
+        applyDB(mergeDB(DB,rdb));SYNC.dirty=true;mode=null;
+      }
+      if(!SYNC.dirty&&remote)break;
+      const res=await ghPut(await encryptDB(DB),remote?remote.sha:undefined);
+      if(res.conflict)continue; // someone pushed in between — pull, merge, retry
+      SYNC.sha=res.sha;SYNC.dirty=false;break;
+    }
+    SYNC.lastSync=Date.now();SYNC.enabled=true;saveSyncCfg();setSyncStatus("ok","Up to date · "+new Date(SYNC.lastSync).toLocaleString());
+    renderSyncCard();
+  }catch(e){
+    saveSyncCfg();setSyncStatus("err",navigator.onLine===false?"Offline — will sync when you're back online.":(e.message||"Sync failed"));
+  }finally{_syncBusy=false;if(_syncAgain){_syncAgain=false;setTimeout(()=>syncNow("again"),500);}}
+}
+// ---- settings UI ----
+function syncSetupCode(){return btoa(unescape(encodeURIComponent(JSON.stringify({o:SYNC.owner,r:SYNC.repo,t:SYNC.token,p:SYNC.pass}))));}
+function renderSyncCard(){
+  const el=document.getElementById("syncCard");if(!el)return;
+  if(syncOn()){
+    el.innerHTML=`<h2>☁️ Sync</h2>
+      <div class="muted" style="font-size:13px">Connected to private repo <b>${escapeHtml(SYNC.owner)}/${escapeHtml(SYNC.repo)}</b> · encrypted with your passphrase.</div>
+      <div class="hint" id="syncMsg">${escapeHtml(_syncStatus.msg||"")}</div>
+      <button class="btn" onclick="syncNow('manual')">Sync now</button>
+      <label style="margin-top:12px">Set up another device</label>
+      <div class="hint">Copy this code and paste it into Settings → Sync on your other device (on Apple devices, copy here and paste there).</div>
+      <button class="btn ghost" onclick="copySetupCode()">Copy setup code</button>
+      <button class="btn danger" onclick="disconnectSync()">Disconnect this device</button>`;
+    return;
+  }
+  el.innerHTML=`<h2>☁️ Sync between devices</h2>
+    <div class="muted" style="font-size:13px;margin-bottom:6px">Keep phone and laptop in sync through a <b>private</b> GitHub repo. Data is encrypted on this device before upload — GitHub only stores ciphertext.</div>
+    <label>Setup code from your other device (optional)</label>
+    <input id="syCode" type="text" placeholder="Paste to fill everything below" oninput="fillFromSetupCode(this.value)">
+    <div class="split"><div><label>GitHub user</label><input id="syOwner" type="text" value="${escapeAttr(SYNC.owner||"Ayon0922")}"></div>
+      <div><label>Private repo</label><input id="syRepo" type="text" value="${escapeAttr(SYNC.repo||"moneymate-data")}"></div></div>
+    <label>Access token</label><input id="syToken" type="password" autocomplete="off" placeholder="github_pat_…" value="${escapeAttr(SYNC.token||"")}">
+    <label>Encryption passphrase</label><input id="syPass" type="password" autocomplete="new-password" placeholder="Same on every device — don't lose it" value="${escapeAttr(SYNC.pass||"")}">
+    <div class="hint" id="syncMsg">${escapeHtml(_syncStatus.msg||"")}</div>
+    <div id="syncChoice"></div>
+    <button class="btn" onclick="connectSync()">Connect</button>`;
+}
+function fillFromSetupCode(v){try{const j=JSON.parse(decodeURIComponent(escape(atob(v.trim()))));
+  if(j.o)document.getElementById("syOwner").value=j.o;if(j.r)document.getElementById("syRepo").value=j.r;
+  if(j.t)document.getElementById("syToken").value=j.t;if(j.p)document.getElementById("syPass").value=j.p;toast("Filled from setup code");}catch(e){}}
+function copySetupCode(){const c=syncSetupCode();
+  (navigator.clipboard?navigator.clipboard.writeText(c):Promise.reject()).then(()=>toast("Setup code copied")).catch(()=>{const i=document.createElement("textarea");i.value=c;document.body.appendChild(i);i.select();document.execCommand("copy");i.remove();toast("Setup code copied");});}
+async function connectSync(){
+  const v=id=>document.getElementById(id).value.trim();
+  const cfg={owner:v("syOwner"),repo:v("syRepo"),token:v("syToken"),pass:document.getElementById("syPass").value};
+  if(!cfg.owner||!cfg.repo||!cfg.token)return toast("Fill in user, repo and token");
+  if((cfg.pass||"").length<8)return toast("Use a passphrase of 8+ characters");
+  SYNC={...cfg,enabled:false,dirty:false,sha:null,salt:null};saveSyncCfg();
+  setSyncStatus("busy","Checking the repo…");
+  try{
+    const r=await gh("");if(r.status===404)throw new Error(`Repo ${cfg.owner}/${cfg.repo} not found, or the token can't see it.`);
+    const repo=await r.json();if(!repo.private)throw new Error("That repo is PUBLIC. Use a private repo for your financial data.");
+    const remote=await ghGet();
+    if(!remote){SYNC.enabled=true;SYNC.dirty=true;saveSyncCfg();await syncNow("first");toast("Sync on — this device's data uploaded");renderSyncCard();return;}
+    await decryptEnv(remote.env); // verifies the passphrase before anything is changed
+    const hasLocal=(DB.txns||[]).length>0;
+    SYNC.enabled=true;saveSyncCfg();
+    if(!hasLocal){await syncNow("first","replace");renderSyncCard();toast("Loaded your data from the cloud");return;}
+    SYNC.enabled=false;saveSyncCfg();
+    document.getElementById("syncChoice").innerHTML=`<div class="advice warn">The cloud already has MoneyMate data, and this device has its own. Which should win?</div>
+      <div class="split"><button class="btn" style="flex:1" onclick="finishConnect('replace')">Use cloud data</button>
+      <button class="btn ghost" style="flex:1" onclick="finishConnect('merge')">Merge both</button></div>
+      <div class="hint">"Use cloud data" replaces what's on this device. "Merge both" keeps every record from both, which can double-count if you entered the same things on each.</div>`;
+    setSyncStatus("pending","");
+  }catch(e){SYNC.enabled=false;saveSyncCfg();setSyncStatus("err",e.message||"Couldn't connect");}
+}
+async function finishConnect(mode){SYNC.enabled=true;SYNC.dirty=mode==="merge";saveSyncCfg();await syncNow("connect",mode);renderSyncCard();toast(mode==="merge"?"Merged and synced":"Loaded your data from the cloud");}
+function disconnectSync(){if(!confirm("Stop syncing on this device? Your data stays here and in the cloud."))return;SYNC={};saveSyncCfg();setSyncStatus("off","");renderSyncCard();}
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&syncOn())syncNow("resume");});
+window.addEventListener("online",()=>{if(syncOn())syncNow("online");});
+
 /* ===================== NAV + INIT ===================== */
 function go(v){
   document.querySelectorAll(".view").forEach(s=>s.classList.remove("active"));
@@ -2000,6 +2187,8 @@ function exportTax(){
   toast("Tax summary exported");
 }
 initUI();
+renderSyncCard();
+if(syncOn()){setSyncStatus(SYNC.dirty?"pending":"ok","");syncNow("open");}
 if("serviceWorker" in navigator){window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));}
 </script>
 </body>
