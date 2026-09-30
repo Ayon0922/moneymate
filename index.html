@@ -1355,7 +1355,7 @@ function txnRow(t){
   const cn=cardName(t);
   return `<div class="txn"><div class="ic">${ic.icon}</div>
     <div class="info"><div class="t">${escapeHtml(displayName(t.note)||ic.name)}</div>
-    <div class="s">${ic.name}${cn?` · 💳 ${escapeHtml(cn)}`:""} · ${fmtDate(t.date)}</div></div>
+    <div class="s">${ic.name}${cn?` · 💳 ${escapeHtml(cn)}`:""} · ${fmtDate(t.date)}${t.pending?" · ⏳ pending":""}</div></div>
     <div class="amt ${isInc?"income":""}">${sign}${money(t.amount)}</div>
     <button class="del" onclick="delTxn(${t.id})">×</button></div>`;}
 function renderExpenses(){
@@ -1609,10 +1609,16 @@ function parseImport(text,fname){
     else{const dv=Math.abs(parseFloat((r[C.debit]||"0").replace(/[^0-9.\-]/g,""))||0),cv=parseFloat((r[C.credit]||"0").replace(/[^0-9.\-]/g,""))||0;amt=cv-dv;}
     if(isNaN(amt)||amt===0)continue;
     const desc=(r[C.desc]||"").trim(),type=C.type>=0?(r[C.type]||""):"";
-    if(C.balance>=0){const b=parseFloat((r[C.balance]||"").replace(/[^0-9.\-]/g,""));if(!isNaN(b)&&date>balDate){bal=b;balDate=date;}}
-    items.push({date,amt,desc,type});
+    let pending=false;
+    if(C.balance>=0){const b=parseFloat((r[C.balance]||"").replace(/[^0-9.\-]/g,""));if(isNaN(b))pending=true;else if(date>balDate){bal=b;balDate=date;}}
+    items.push({date,amt,desc,type,pending});
   }
-  stageImport(items,{balance:bal,balDate});
+  // Chase leaves Balance blank on pending rows; its app's "available balance" includes them.
+  // So: current balance = last posted balance + every pending row dated on/after it.
+  if(bal!=null){const pend=items.filter(i=>i.pending&&i.date>=balDate);
+    bal=Math.round((bal+pend.reduce((s,i)=>s+i.amt,0))*100)/100;
+    for(const i of pend)if(i.date>balDate)balDate=i.date;}
+  stageImport(items,{balance:bal,balDate,pendingCount:items.filter(i=>i.pending).length});
 }
 /* ---- Credit card CSVs (Discover, Chase card, generic) ---- */
 function isCardCSV(h,fname){
@@ -1688,14 +1694,21 @@ function setImportCard(v){if(!_pendingImport||!_pendingImport.card)return;const 
   const items=_pendingImport._items;stageCardImport(items,m);}
 // Shared by CSV + PDF import: dedupe against existing data, categorize, stage for preview.
 function stageImport(items,meta){
-  const cnt={};DB.txns.filter(t=>!isCard(t)).forEach(t=>{const k=dedupeKey(t.date,txSigned(t),t.note);cnt[k]=(cnt[k]||0)+1;});
-  const parsed=[];let dup=0;
+  const byKey={};DB.txns.filter(t=>!isCard(t)).forEach(t=>{const k=dedupeKey(t.date,txSigned(t),t.note);(byKey[k]=byKey[k]||[]).push(t);});
+  const parsed=[],matched=new Set(),promote=[];let dup=0;
   for(const it of items){
     const key=dedupeKey(it.date,it.amt,it.desc);
-    if(cnt[key]>0){cnt[key]--;dup++;continue;}
+    const hit=(byKey[key]||[]).find(t=>!matched.has(t.id));
+    if(hit){matched.add(hit.id);dup++;if(hit.pending&&!it.pending)promote.push(hit.id);continue;}
     const ty=it.amt>0?"income":"expense",cat=it.amt>0?incClassify(it.desc):expenseCat(it.desc,it.type);
-    parsed.push({date:it.date,type:ty,amount:Math.round(Math.abs(it.amt)*100)/100,cat,note:it.desc,source:"bank"});
+    const t={date:it.date,type:ty,amount:Math.round(Math.abs(it.amt)*100)/100,cat,note:it.desc,source:"bank"};
+    if(it.pending)t.pending=true;
+    parsed.push(t);
   }
+  // A pending row usually posts a day or two later under a different description.
+  // Any earlier-imported pending row this file (which covers its date) no longer lists → it posted/cleared: remove it.
+  const fileFrom=items.length?items.map(i=>i.date).sort()[0]:null;
+  const dropPending=fileFrom?DB.txns.filter(t=>isBank(t)&&t.pending&&!matched.has(t.id)&&t.date>=fileFrom).map(t=>t.id):[];
   // Only re-anchor the balance if this file is at least as recent as the bank data we already have
   const bankDates=DB.txns.filter(isBank).map(t=>t.date).sort();
   const lastHave=bankDates.length?bankDates[bankDates.length-1]:"";
@@ -1705,7 +1718,7 @@ function stageImport(items,meta){
   let gap=null;
   const firstNew=items.length?items.map(i=>i.date).sort()[0]:null,from=meta.periodStart||firstNew;
   if(lastHave&&from&&(new Date(from+"T00:00")-new Date(lastHave+"T00:00"))/864e5>5)gap={from:lastHave,to:from};
-  _pendingImport={txns:parsed,dup,balance:anchor?meta.balance:null,staleBal:meta.balance!=null&&!anchor,gap,meta};
+  _pendingImport={txns:parsed,dup,balance:anchor?meta.balance:null,staleBal:meta.balance!=null&&!anchor,gap,meta,promote,dropPending};
   renderImportPreview();
 }
 function renderImportPreview(){
@@ -1715,10 +1728,15 @@ function renderImportPreview(){
   if(p.card)return renderCardPreview(el,p);
   const head=m.kind==="pdf"?`<div class="advice ${m.reconciled?"good":"bad"}">${m.reconciled?"✅":"⚠️"} Chase statement ${fmtDate(m.periodStart)} – ${fmtDate(m.periodEnd)} · ${m.count} transactions · ${money(m.begin)} → ${money(m.end)}${m.reconciled?" · reconciled to the penny":" · running balance did NOT reconcile — check before importing"}</div>`:"";
   const gapHtml=p.gap?`<div class="advice warn">Gap: no bank transactions between <b>${fmtDate(p.gap.from)}</b> and <b>${fmtDate(p.gap.to)}</b>. Import that period's statement too, or monthly totals for it will be understated.</div>`:"";
-  if(!n){el.innerHTML=head+`<div class="advice good">Nothing new — all ${p.dup} transaction${p.dup!==1?"s":""} in that file are already imported. ✅</div>`;_pendingImport=null;return;}
+  if(!n){
+    const before=bankBalance();applyBankImportExtras(p);const after=bankBalance();
+    const changed=Math.abs(after-before)>0.004||p.dropPending.length||p.promote.length;
+    if(changed){_tokCache=null;save();renderExpenses();renderDash();renderBudget();}
+    el.innerHTML=head+`<div class="advice good">Nothing new — all ${p.dup} transaction${p.dup!==1?"s":""} in that file are already imported. ✅${Math.abs(after-before)>0.004?`<br>Bank balance updated to <b>${money(after)}</b>.`:""}${p.dropPending.length?`<br>Removed ${p.dropPending.length} pending item${p.dropPending.length>1?"s":""} that have since posted.`:""}</div>`;
+    _pendingImport=null;return;}
   const tr=p.txns.filter(t=>t.type==="expense"&&t.cat==="transfer"&&OWN_TRANSFER_RX.test(t.note)).reduce((s,t)=>s+t.amount,0);
   const rowHtml=t=>{const ic=t.type==="income"?(incCatMap[t.cat]||incCatMap.refund):(catMap[t.cat]||catMap.other);return `<div class="txn"><div class="ic">${ic.icon}</div><div class="info"><div class="t">${escapeHtml(displayName(t.note))}</div><div class="s">${ic.name} · ${fmtDate(t.date)}</div></div><div class="amt ${t.type==="income"?"income":""}">${t.type==="income"?"+":"-"}${money(t.amount)}</div></div>`;};
-  el.innerHTML=head+gapHtml+`<div class="hint"><b>${n}</b> new · ${p.dup} duplicate${p.dup!==1?"s":""} skipped${p.balance!=null?` · balance will be set to <b>${money(p.balance)}</b>`:""}${p.staleBal?" · older than your latest data or the balance you set, so your balance won't change":""}</div>
+  el.innerHTML=head+gapHtml+`<div class="hint"><b>${n}</b> new · ${p.dup} duplicate${p.dup!==1?"s":""} skipped${p.balance!=null?` · balance will be set to <b>${money(p.balance)}</b>`:""}${p.staleBal?" · older than your latest data or the balance you set, so your balance won't change":""}${m.pendingCount?` · includes ${m.pendingCount} pending`:""}${p.dropPending&&p.dropPending.length?` · replaces ${p.dropPending.length} earlier pending item${p.dropPending.length>1?"s":""}`:""}</div>
     ${tr>0?`<div class="hint">🔄 ${money(tr)} of card payments / investing moved to Cash/Transfer so it isn't counted as spending.</div>`:""}
     ${p.txns.slice(0,12).map(rowHtml).join("")}${n>12?`<div class="hint" style="text-align:center;margin-top:6px">…and ${n-12} more</div>`:""}
     <div class="split" style="margin-top:10px">
@@ -1746,6 +1764,11 @@ function renderCardPreview(el,p){
       <button class="btn ghost" style="flex:1" onclick="cancelImport()">Cancel</button>
     </div>`;
 }
+function applyBankImportExtras(p){
+  if(p.dropPending&&p.dropPending.length){const d=new Set(p.dropPending);DB.txns=DB.txns.filter(t=>!d.has(t.id));}
+  if(p.promote)for(const id of p.promote){const t=DB.txns.find(x=>x.id===id);if(t)delete t.pending;}
+  if(p.balance!=null)DB.settings.startBal+=(p.balance-bankBalance()); // re-anchor to the file's current balance (posted + pending)
+}
 function confirmImport(){
   const p=_pendingImport;if(!p||!p.txns.length)return;
   if(p.card){
@@ -1759,7 +1782,7 @@ function confirmImport(){
     renderExpenses();renderDash();renderBudget();renderNoteSuggest();toast("Imported "+p.txns.length);return;
   }
   const base=Date.now();p.txns.forEach((t,i)=>{t.id=base+i;DB.txns.push(t);});
-  if(p.balance!=null)DB.settings.startBal+=(p.balance-bankBalance()); // re-anchor bank balance to the file's latest balance
+  applyBankImportExtras(p);
   _tokCache=null;save();
   document.getElementById("csvPreview").innerHTML=`<div class="advice good">Imported ${p.txns.length} transaction${p.txns.length>1?"s":""}. ✅</div>`;
   _pendingImport=null;
