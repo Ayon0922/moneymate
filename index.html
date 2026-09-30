@@ -172,6 +172,7 @@
       <div class="mini"><div class="k">Days left</div><div class="v" id="mDays">0</div></div>
       <div class="mini"><div class="k">Safe / day</div><div class="v warn" id="mPerDay">$0</div></div>
     </div>
+    <div class="card" id="cardsBox"></div>
     <div class="card"><h2>💡 Smart Suggestions</h2><div id="advice"></div></div>
     <div class="card"><h2>Recent Activity</h2><div id="recent"></div></div>
   </section>
@@ -196,10 +197,14 @@
       <button class="btn" onclick="addTxn()">Add</button>
     </div>
     <div class="card">
-      <h2>📥 Import bank CSV</h2>
-      <div class="muted" style="font-size:13px;margin-bottom:8px">Download your transactions as a CSV from your bank, then pick the file. It auto-categorizes, skips anything already imported, and sets your balance from the file.</div>
+      <h2>📥 Import bank activity</h2>
+      <div class="muted" style="font-size:13px;margin-bottom:8px">Pick your monthly Chase statement PDF, a bank CSV, or a credit card CSV (Discover, Chase card…). It auto-categorizes, skips anything already imported, checks the statement's running balance to the penny, and sets your balance from the file.</div>
       <input id="csvFile" type="file" accept=".csv,text/csv" style="display:none" onchange="importCSV(this)">
-      <button class="btn" onclick="document.getElementById('csvFile').click()">Choose CSV file</button>
+      <input id="pdfFile" type="file" accept=".pdf,application/pdf" style="display:none" onchange="importPDF(this)">
+      <div class="split">
+        <button class="btn" style="flex:1" onclick="document.getElementById('pdfFile').click()">Statement PDF</button>
+        <button class="btn ghost" style="flex:1" onclick="document.getElementById('csvFile').click()">CSV file</button>
+      </div>
       <div id="csvPreview" style="margin-top:12px"></div>
     </div>
     <div class="card">
@@ -495,7 +500,7 @@ const INCOME_CATS=[
 ];
 const incCatMap=Object.fromEntries(INCOME_CATS.map(c=>[c.id,c]));
 const DEFAULT={
-  txns:[], splits:[], stubs:[], paychecks:[], goals:[], taxItems:[], accounts:[],
+  txns:[], splits:[], stubs:[], paychecks:[], goals:[], taxItems:[], accounts:[], cards:[],
   budgets:{food:200,groceries:250,goingout:150,transport:80,bills:400,shopping:100,health:50,other:60},
   settings:{startBal:0,cashBal:0,rate:16,freq:26,filing:"single",state:"MD",stateRate:0,local:2.83,intl:true,fedStdElig:false,treaty:0}
 };
@@ -510,22 +515,99 @@ function load(){
       settings:{...DEFAULT.settings,...(d.settings||{})},
       budgets:{...DEFAULT.budgets,...(d.budgets||{})},
       goals:(d.goals&&d.goals.length)?d.goals:(d.goal&&d.goal.target?[{id:Date.now(),...d.goal}]:[]),
-      splits:d.splits||[], stubs:d.stubs||[], paychecks:d.paychecks||[], taxItems:d.taxItems||[], accounts:d.accounts||[]};
+      splits:d.splits||[], stubs:d.stubs||[], paychecks:d.paychecks||[], taxItems:d.taxItems||[], accounts:d.accounts||[], cards:d.cards||[]};
   }catch(e){return structuredClone(DEFAULT);}
 }
 function save(){localStorage.setItem("moneymate",JSON.stringify(DB));}
 const money=n=>(n<0?"-$":"$")+Math.abs(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
 const money0=n=>(n<0?"-$":"$")+Math.abs(Math.round(n)).toLocaleString("en-US");
-const todayStr=()=>new Date().toISOString().slice(0,10);
+// Local-time ISO date (toISOString is UTC, which shifts evening entries to the next day in ET)
+Date.prototype.toLocalISO=function(){return this.getFullYear()+"-"+String(this.getMonth()+1).padStart(2,"0")+"-"+String(this.getDate()).padStart(2,"0");};
+const todayStr=()=>new Date().toLocalISO();
 const monthKey=d=>d.slice(0,7);
 
 function inThisMonth(d){const n=new Date(),x=new Date(d+"T00:00");return x.getFullYear()===n.getFullYear()&&x.getMonth()===n.getMonth();}
 function daysLeftInMonth(){const n=new Date();return new Date(n.getFullYear(),n.getMonth()+1,0).getDate()-n.getDate()+1;}
 function dayOfMonth(){return new Date().getDate();}
 
-function bankBalance(){return DB.settings.startBal+DB.txns.reduce((s,t)=>s+(t.source==="cash"?0:(t.type==="income"?t.amount:-t.amount)),0);}
+const isCard=t=>typeof t.source==="string"&&t.source.startsWith("card:");
+const isBank=t=>t.source!=="cash"&&!isCard(t);
+function bankBalance(){return DB.settings.startBal+DB.txns.reduce((s,t)=>s+(isBank(t)?(t.type==="income"?t.amount:-t.amount):0),0);}
 function cashBalance(){return (DB.settings.cashBal||0)+DB.txns.reduce((s,t)=>s+(t.source==="cash"?(t.type==="income"?t.amount:-t.amount):0),0);}
 function totalBalance(){return bankBalance()+cashBalance();}
+/* ===================== CREDIT CARDS ===================== */
+// Card purchases are real spending (they count in budgets/analytics) but don't touch bank balance.
+// Card-side payments use type "cardpay" so they're excluded from every income/expense total;
+// the matching bank-side payment is already a Cash/Transfer.
+const cardTx=c=>DB.txns.filter(t=>t.source==="card:"+c.id);
+const postOf=t=>t.postDate||t.date; // statements cycle on the post date
+function cardBalance(c,asOf){ // amount owed (negative = credit balance)
+  return Math.round(((+c.openingBal||0)+cardTx(c).filter(t=>!asOf||postOf(t)<=asOf).reduce((s,t)=>s+(t.type==="expense"?t.amount:-t.amount),0))*100)/100;}
+function cardsOwed(asOf){return (DB.cards||[]).reduce((s,c)=>s+Math.max(0,cardBalance(c,asOf)),0);}
+function availableBalance(){return totalBalance()-cardsOwed();}
+const _ymd=(y,m,d)=>new Date(y,m,Math.min(d,new Date(y,m+1,0).getDate())).toLocalISO();
+function lastClose(c){ // most recent statement closing date on or before today
+  if(!c.stmtDay)return null;const n=new Date(),d=+c.stmtDay;
+  const thisM=_ymd(n.getFullYear(),n.getMonth(),d);return thisM<=todayStr()?thisM:_ymd(n.getFullYear(),n.getMonth()-1,d);}
+function nextDue(c,close){ // due date for the statement that closed on `close`
+  if(!close)return null;const [y,m]=close.split("-").map(Number);
+  if(c.dueDay){const dd=+c.dueDay;return dd>+c.stmtDay?_ymd(y,m-1,dd):_ymd(y,m,dd);}
+  const x=new Date(close+"T00:00");x.setDate(x.getDate()+25);return x.toLocalISO(); // typical 25-day grace period
+}
+function cardStatus(c){
+  const bal=cardBalance(c),close=lastClose(c),out={c,bal,util:c.limit>0?bal/c.limit:null};
+  const since=cardTx(c).filter(t=>!close||postOf(t)>close);
+  out.cycleSpend=since.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);
+  if(close){
+    out.close=close;out.stmtBal=cardBalance(c,close);
+    out.paidSince=since.filter(t=>t.type!=="expense").reduce((s,t)=>s+t.amount,0);
+    out.due=nextDue(c,close);out.remaining=Math.max(0,Math.round((out.stmtBal-out.paidSince)*100)/100);
+    out.daysToDue=Math.round((new Date(out.due+"T00:00")-new Date(todayStr()+"T00:00"))/864e5);
+  }
+  return out;
+}
+function renderCards(){
+  const el=document.getElementById("cardsBox");if(!el)return;
+  const cards=DB.cards||[];
+  const addForm=`<div class="split" style="margin-top:4px"><div><input id="newCardName" type="text" placeholder="${cards.length?"Add another card":"Card name, e.g. Discover"}"></div><div><button class="btn ghost sm" style="width:100%" onclick="addCardFromForm()">Add card</button></div></div>`;
+  if(!cards.length){el.innerHTML=`<h2>💳 Credit Cards</h2><div class="muted" style="font-size:13px;margin-bottom:8px">Import a card's CSV in Expenses, or add a card and log purchases against it.</div>`+addForm;return;}
+  el.innerHTML=`<h2>💳 Credit Cards</h2>`+cards.map(c=>{
+    const st=cardStatus(c),u=st.util;
+    const uCol=u==null?"var(--muted)":u>0.3?"var(--bad)":u>0.1?"var(--warn)":"var(--good)";
+    const dueLine=st.close?(st.remaining>0
+      ?`<div class="advice ${st.daysToDue<=5?"bad":st.daysToDue<=10?"warn":"good"}">Pay <b>${money(st.remaining)}</b> by <b>${fmtDate(st.due)}</b>${st.daysToDue>=0?` (${st.daysToDue} day${st.daysToDue!==1?"s":""})`:" — past due!"} to avoid interest.${c.dueDay?"":" <span class='muted'>(due date estimated)</span>"}</div>`
+      :`<div class="advice good">Statement of ${money(st.stmtBal)} (closed ${fmtDate(st.close)}) is paid ✅</div>`)
+      :`<div class="advice warn">Set the statement closing day below to see what's due and when.</div>`;
+    return `<div style="margin-bottom:14px">
+      <div class="catbar"><div class="r1"><span><b>${escapeHtml(c.name)}</b>${c.last4?` ·${escapeHtml(c.last4)}`:""}</span><span><b>${money(st.bal)}</b> owed</span></div>
+      ${u!=null?`<div class="track"><div class="fill" style="width:${Math.min(100,Math.max(0,u*100))}%;background:${uCol}"></div></div>
+      <div class="muted" style="font-size:12px;margin-top:4px">${Math.round(u*100)}% of ${money0(c.limit)} limit${u>0.3?" — above 30% can hurt your credit score":""}</div>`:""}
+      <div class="muted" style="font-size:12px;margin-top:4px">This cycle: ${money(st.cycleSpend)} spent${st.close?` since ${fmtDate(st.close)}`:""}</div></div>
+      ${dueLine}
+      <details style="margin-top:6px"><summary class="muted" style="font-size:12px;cursor:pointer">Card settings</summary>
+        <div class="split" style="margin-top:8px">
+          <div><label>Name</label><input type="text" value="${escapeAttr(c.name)}" onchange="setCard(${c.id},'name',this.value)"></div>
+          <div><label>Credit limit ($)</label><input type="number" value="${c.limit||""}" onchange="setCard(${c.id},'limit',this.value)"></div></div>
+        <div class="split">
+          <div><label>Statement closes (day)</label><input type="number" min="1" max="31" value="${c.stmtDay||""}" onchange="setCard(${c.id},'stmtDay',this.value)"></div>
+          <div><label>Payment due (day)</label><input type="number" min="1" max="31" value="${c.dueDay||""}" placeholder="≈ close + 25" onchange="setCard(${c.id},'dueDay',this.value)"></div></div>
+        <div class="split">
+          <div><label>APR (%)</label><input type="number" step="0.01" value="${c.apr||""}" onchange="setCard(${c.id},'apr',this.value)"></div>
+          <div><label>Starting balance ($)</label><input type="number" step="0.01" value="${c.openingBal||0}" onchange="setCard(${c.id},'openingBal',this.value)"></div></div>
+        <button class="btn ghost sm" onclick="delCard(${c.id})">Remove card &amp; its transactions</button>
+      </details></div>`;}).join("")+addForm;
+}
+function setCard(id,k,v){const c=(DB.cards||[]).find(x=>x.id===id);if(!c)return;c[k]=k==="name"?v.trim():(v===""?null:+v);save();renderCards();renderDash();}
+function delCard(id){const c=(DB.cards||[]).find(x=>x.id===id);if(!c)return;
+  const n=cardTx(c).length;DB.txns=DB.txns.filter(t=>t.source!=="card:"+id);DB.cards=DB.cards.filter(x=>x.id!==id);
+  _tokCache=null;save();renderCards();renderDash();renderExpenses();updateSourceOptions();toast(`Removed ${c.name} (${n} txns)`);}
+function addCard(name,extra){const c={id:Date.now(),name:name||"Credit card",limit:null,stmtDay:null,dueDay:null,apr:null,openingBal:0,...(extra||{})};(DB.cards=DB.cards||[]).push(c);return c;}
+function addCardFromForm(){const n=document.getElementById("newCardName").value.trim();if(!n)return toast("Enter a card name");addCard(n);save();renderCards();renderDash();updateSourceOptions();toast("Card added");}
+function updateSourceOptions(){
+  const el=document.getElementById("eSource");if(!el)return;const v=el.value;
+  el.innerHTML=`<option value="bank">🏦 Bank</option><option value="cash">💵 Cash</option>`+(DB.cards||[]).map(c=>`<option value="card:${c.id}">💳 ${escapeHtml(c.name)}</option>`).join("");
+  if([...el.options].some(o=>o.value===v))el.value=v;
+}
 function balance(){return bankBalance();} // "balance()" = bank (used by settings back-solve)
 function spentThisMonth(cat){return DB.txns.filter(t=>t.type==="expense"&&inThisMonth(t.date)&&(cat?t.cat===cat:t.cat!=="transfer")).reduce((s,t)=>s+t.amount,0);}
 function totalBudget(){return Object.values(DB.budgets).reduce((a,b)=>a+(+b||0),0);}
@@ -569,13 +651,21 @@ function computePay(hours,ot,rate){return taxesForGross(hours*rate+ot*rate*1.5);
 
 /* ===================== SMART SUGGESTIONS ===================== */
 function suggestions(){
-  const bal=totalBalance(),daysLeft=daysLeftInMonth(),dayN=dayOfMonth(),spent=spentThisMonth(),out=[];
+  const bal=availableBalance(),daysLeft=daysLeftInMonth(),dayN=dayOfMonth(),spent=spentThisMonth(),out=[];
   const burn=dayN>0?spent/dayN:0, projected=burn*daysLeft, endBal=bal-projected;
   const safePerDay=daysLeft>0?Math.max(0,bal)/daysLeft:0;
+  // Stale data: projections below would assume $0 spending, which is misleading
+  const lastTx=DB.txns.reduce((m,t)=>t.date>m?t.date:m,"");
+  const staleDays=lastTx?Math.round((new Date(todayStr()+"T00:00")-new Date(lastTx+"T00:00"))/864e5):null;
+  const stale=staleDays===null||staleDays>7;
+  if(stale){out.push(["warn",lastTx?`📥 Nothing logged since <b>${fmtDate(lastTx)}</b> (${staleDays} days). Import your latest bank statement and card CSV in Expenses — until then, the numbers here assume you spent $0.`:`📥 No transactions yet — import a bank statement or card CSV in Expenses to get real projections.`]);return out;}
   if(bal<=0) out.push(["bad",`Your balance is ${money(bal)}. Add income or a paycheck before spending more.`]);
   else if(endBal<0) out.push(["bad",`⚠️ At ${money0(burn)}/day you'll be <b>${money0(-endBal)} short</b> before month-end. Cap spending at <b>${money0(safePerDay)}/day</b>.`]);
   else if(endBal<bal*0.15) out.push(["warn",`Tight — projected to end with only ${money0(endBal)}. Keep under <b>${money0(safePerDay)}/day</b>.`]);
   else out.push(["good",`On track ✅ At ${money0(burn)}/day you'll finish with ~<b>${money0(endBal)}</b>. Safe up to ${money0(safePerDay)}/day.`]);
+  for(const c of (DB.cards||[])){const st=cardStatus(c);
+    if(st.close&&st.remaining>0&&st.daysToDue<=10)out.push([st.daysToDue<=3?"bad":"warn",`💳 <b>${escapeHtml(c.name)}</b>: pay <b>${money0(st.remaining)}</b> by ${fmtDate(st.due)} (${st.daysToDue} day${st.daysToDue!==1?"s":""}) — paying the full statement avoids interest.`]);
+    if(st.util!=null&&st.util>0.3)out.push(["warn",`💳 ${escapeHtml(c.name)} is at <b>${Math.round(st.util*100)}%</b> of its limit. Keeping it under 30% protects your credit score.`]);}
   const overs=[];
   for(const c of CATS){const cap=+DB.budgets[c.id]||0;if(!cap)continue;const sp=spentThisMonth(c.id);if(sp>cap)overs.push({c,over:sp-cap,sp,cap});}
   overs.sort((a,b)=>b.over-a.over);
@@ -590,7 +680,7 @@ function suggestions(){
   const soonSubs=detectRecurring().filter(x=>{if(!x.next)return false;const d=Math.round((new Date(x.next)-new Date(todayStr()))/864e5);return d>=0&&d<=3;});
   if(soonSubs.length) out.push(["warn",`Upcoming charge${soonSubs.length>1?"s":""} in the next few days: ${soonSubs.slice(0,3).map(x=>escapeHtml(x.name.split(" ").slice(0,2).join(" "))+" ~"+money0(x.monthly)).join(", ")}.`]);
   // trend-aware: a category on pace to rise vs last month
-  const now=new Date(),thisK=now.toISOString().slice(0,7),lastK=new Date(now.getFullYear(),now.getMonth()-1,1).toISOString().slice(0,7),dim=new Date(now.getFullYear(),now.getMonth()+1,0).getDate();
+  const now=new Date(),thisK=now.toLocalISO().slice(0,7),lastK=new Date(now.getFullYear(),now.getMonth()-1,1).toLocalISO().slice(0,7),dim=new Date(now.getFullYear(),now.getMonth()+1,0).getDate();
   const catMo=(id,k)=>DB.txns.filter(t=>t.type==="expense"&&t.cat===id&&t.date.slice(0,7)===k).reduce((s,t)=>s+t.amount,0);
   let rise=null;
   for(const c of SPEND_CATS){const proj=dayN>0?catMo(c.id,thisK)/dayN*dim:0,last=catMo(c.id,lastK);if(last>20&&proj>last*1.3){const pct=Math.round((proj-last)/last*100);if(!rise||pct>rise.pct)rise={c,pct,proj,last};}}
@@ -615,7 +705,7 @@ function monthlyTotals(n){
   const now=new Date(),arr=[];
   for(let i=n-1;i>=0;i--){
     const d=new Date(now.getFullYear(),now.getMonth()-i,1);
-    const key=d.toISOString().slice(0,7);
+    const key=d.toLocalISO().slice(0,7);
     const total=DB.txns.filter(t=>t.type==="expense"&&t.cat!=="transfer"&&monthKey(t.date)===key).reduce((s,t)=>s+t.amount,0);
     arr.push({key,label:d.toLocaleDateString("en-US",{month:"short"}),total});
   }
@@ -658,7 +748,7 @@ function donutSVG(data,tot,label){
 }
 function renderDailyTrends(){
   const el=document.getElementById("dailyTrends");if(!el)return;
-  const now=new Date(),iso=d=>d.toISOString().slice(0,10);
+  const now=new Date(),iso=d=>d.toLocalISO();
   // last 14 days daily spend (real spending, excl transfers)
   const days=[];for(let i=13;i>=0;i--){const d=new Date(now.getFullYear(),now.getMonth(),now.getDate()-i);const k=iso(d);
     const sp=DB.txns.filter(t=>t.type==="expense"&&t.cat!=="transfer"&&t.date===k).reduce((s,t)=>s+t.amount,0);
@@ -688,16 +778,18 @@ function renderDailyTrends(){
 }
 function netWorth(){
   const assets=(DB.accounts||[]).filter(a=>a.type!=="liability").reduce((s,a)=>s+(+a.balance||0),0);
-  const liab=(DB.accounts||[]).filter(a=>a.type==="liability").reduce((s,a)=>s+(+a.balance||0),0);
-  return {liquid:totalBalance(),assets,liab,total:totalBalance()+assets-liab};
+  const manualLiab=(DB.accounts||[]).filter(a=>a.type==="liability").reduce((s,a)=>s+(+a.balance||0),0);
+  const cards=cardsOwed(),liab=manualLiab+cards;
+  return {liquid:totalBalance(),assets,liab,manualLiab,cards,total:totalBalance()+assets-liab};
 }
 function renderNetWorth(){
   const el=document.getElementById("netWorth");if(!el)return;
   const nw=netWorth();
   const now=new Date(),pts=[];
-  for(let i=5;i>=0;i--){const d=new Date(now.getFullYear(),now.getMonth()-i,1),key=d.toISOString().slice(0,7);
-    const after=DB.txns.filter(t=>t.date.slice(0,7)>key).reduce((s,t)=>s+(t.type==="income"?t.amount:-t.amount),0);
-    pts.push({label:d.toLocaleDateString("en-US",{month:"short"}),val:(totalBalance()-after)+nw.assets-nw.liab});}
+  for(let i=5;i>=0;i--){const d=new Date(now.getFullYear(),now.getMonth()-i,1),key=d.toLocalISO().slice(0,7);
+    const after=DB.txns.filter(t=>!isCard(t)&&t.date.slice(0,7)>key).reduce((s,t)=>s+(t.type==="income"?t.amount:-t.amount),0);
+    const eom=new Date(d.getFullYear(),d.getMonth()+1,0).toLocalISO();
+    pts.push({label:d.toLocaleDateString("en-US",{month:"short"}),val:(totalBalance()-after)+nw.assets-nw.manualLiab-cardsOwed(eom)});}
   const vals=pts.map(p=>p.val),mn=Math.min(0,...vals),mx=Math.max(...vals,1),range=(mx-mn)||1;
   const bars=pts.map(p=>`<div class="col"><div class="vl">${money0(p.val)}</div><div class="bx" style="height:${Math.max(3,(p.val-mn)/range*100)}%;background:${p.val>=0?"linear-gradient(180deg,var(--good),#059669)":"var(--bad)"}"></div><div class="lb">${p.label}</div></div>`).join("");
   const acc=(DB.accounts||[]);
@@ -709,6 +801,7 @@ function renderNetWorth(){
     <div class="muted" style="font-size:11px;margin:6px 0 10px;text-align:center">Net worth over time (liquid balance + your accounts)</div>
     <div class="split-item"><div class="ic">🏦</div><div class="who"><div class="n">Bank</div><div class="m">live balance</div></div><div class="amt">${money(bankBalance())}</div></div>
     <div class="split-item"><div class="ic">💵</div><div class="who"><div class="n">Cash</div><div class="m">live balance</div></div><div class="amt">${money(cashBalance())}</div></div>
+    ${(DB.cards||[]).map(c=>`<div class="split-item"><div class="ic">💳</div><div class="who"><div class="n">${escapeHtml(c.name)}</div><div class="m">card balance (from transactions)</div></div><div class="amt">-${money(Math.max(0,cardBalance(c)))}</div></div>`).join("")}
     ${acc.map(a=>`<div class="split-item"><div class="ic">${a.type==="liability"?"💳":"📈"}</div>
       <div class="who"><div class="n">${escapeHtml(a.name)}</div><div class="m">${a.type==="liability"?"debt":"asset"}</div></div>
       <input type="number" value="${a.balance}" style="width:96px;padding:5px 8px;font-size:13px" onchange="setAccountBal(${a.id},this.value)">
@@ -1100,7 +1193,7 @@ function avgMonthlyIncome(){
   return inc/3;
 }
 function histShares(){
-  const n=new Date(),cut=new Date(n.getFullYear(),n.getMonth()-6,1).toISOString().slice(0,10);
+  const n=new Date(),cut=new Date(n.getFullYear(),n.getMonth()-6,1).toLocalISO().slice(0,10);
   const by={};let tot=0;
   DB.txns.filter(t=>t.type==="expense"&&t.cat!=="transfer"&&t.date>=cut).forEach(t=>{by[t.cat]=(by[t.cat]||0)+t.amount;tot+=t.amount;});
   const sh={};SPEND_CATS.forEach(c=>sh[c.id]=tot>0?(by[c.id]||0)/tot:1/SPEND_CATS.length);
@@ -1144,7 +1237,7 @@ function recentFlexAnalysis(FLEX){
   const catW={},catAvg={};FLEX.forEach(c=>{catW[c.id]=0;catAvg[c.id]=0;});
   let totW=0,months=0;
   for(let a=0;a<=2;a++){
-    const k=new Date(now.getFullYear(),now.getMonth()-a,1).toISOString().slice(0,7);
+    const k=new Date(now.getFullYear(),now.getMonth()-a,1).toLocalISO().slice(0,7);
     let has=false;
     FLEX.forEach(c=>{
       let sp=DB.txns.filter(t=>t.type==="expense"&&t.cat===c.id&&t.date.slice(0,7)===k).reduce((s,t)=>s+t.amount,0);
@@ -1200,15 +1293,17 @@ function renderBudgetExtras(){
 /* ===================== RENDER: dash/exp/budget ===================== */
 function renderDash(){
   document.getElementById("balAmt").textContent=money(totalBalance());
-  document.getElementById("balBreak").innerHTML=`🏦 Bank ${money0(bankBalance())} &nbsp;·&nbsp; 💵 Cash ${money0(cashBalance())}`;
+  const owed=cardsOwed();
+  document.getElementById("balBreak").innerHTML=`🏦 Bank ${money0(bankBalance())} &nbsp;·&nbsp; 💵 Cash ${money0(cashBalance())}`+(owed>0?`<br>💳 Cards owed ${money0(owed)} &nbsp;·&nbsp; <b>Available ${money0(availableBalance())}</b>`:"");
   const spent=spentThisMonth();
   document.getElementById("mSpent").textContent=money0(spent);
   const bl=document.getElementById("mBudLeft"),budLeft=totalBudget()-spent;
   bl.textContent=money0(budLeft);bl.className="v "+(budLeft<0?"bad":"good");
   document.getElementById("mDays").textContent=daysLeftInMonth();
-  const perDay=daysLeftInMonth()>0?Math.max(0,totalBalance())/daysLeftInMonth():0;
+  const perDay=daysLeftInMonth()>0?Math.max(0,availableBalance())/daysLeftInMonth():0; // after card debt
   document.getElementById("mPerDay").textContent=money0(perDay);
   document.getElementById("advice").innerHTML=suggestions().map(([l,t])=>`<div class="advice ${l}">${t}</div>`).join("");
+  renderCards();
   const rec=DB.txns.slice().sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id).slice(0,5);
   document.getElementById("recent").innerHTML=rec.length?rec.map(txnRow).join(""):`<div class="empty">No transactions yet. Add one from Expenses.</div>`;
 }
@@ -1227,6 +1322,7 @@ const MERCHANT_ALIASES=[
  [/paypal/i,"PayPal"],[/cash app/i,"Cash App"],[/venmo/i,"Venmo"],[/liquor|ridgeway/i,"Liquor store"],[/tobacco/i,"Tobacco"],
  [/bookstore/i,"Bookstore"],[/anthropic|claude/i,"Claude"],[/openai|chatgpt/i,"ChatGPT"],[/cursor/i,"Cursor"],
  [/auto care|muffler|\btire\b/i,"Auto repair"],[/mva|state highway|toll|e.?zpass/i,"DMV / tolls"],[/atul/i,"Atul Bakery"],[/kabab|kabob/i,"Kabab Hut"],
+ [/charmpass/i,"CharmPass (MTA)"],[/nayax/i,"Vending (Nayax)"],[/csc serviceworks/i,"Laundry"],[/baltimore gas|\bbge\b/i,"BGE"],[/doordash/i,"DoorDash"],[/weis markets/i,"Weis Markets"],[/badminton/i,"Badminton"],[/maiden choice liquor/i,"Liquor store"],
  [/umbc/i,"UMBC"],
 ];
 function displayName(note){
@@ -1244,11 +1340,14 @@ function displayName(note){
   d=d.split(/\s+/).slice(0,3).join(" ");
   return d||n;
 }
+const CARDPAY_IC={icon:"💳",name:"Card payment"};
+function cardName(t){const c=isCard(t)&&(DB.cards||[]).find(x=>"card:"+x.id===t.source);return c?c.name:"";}
 function txnRow(t){
-  const isInc=t.type==="income",ic=isInc?(incCatMap[t.cat]||incCatMap.refund):(catMap[t.cat]||catMap.other),sign=isInc?"+":"-";
+  const isInc=t.type==="income"||t.type==="cardpay",ic=t.type==="cardpay"?CARDPAY_IC:t.type==="income"?(incCatMap[t.cat]||incCatMap.refund):(catMap[t.cat]||catMap.other),sign=isInc?"+":"-";
+  const cn=cardName(t);
   return `<div class="txn"><div class="ic">${ic.icon}</div>
     <div class="info"><div class="t">${escapeHtml(displayName(t.note)||ic.name)}</div>
-    <div class="s">${ic.name} · ${fmtDate(t.date)}</div></div>
+    <div class="s">${ic.name}${cn?` · 💳 ${escapeHtml(cn)}`:""} · ${fmtDate(t.date)}</div></div>
     <div class="amt ${isInc?"income":""}">${sign}${money(t.amount)}</div>
     <button class="del" onclick="delTxn(${t.id})">×</button></div>`;}
 function renderExpenses(){
@@ -1477,16 +1576,24 @@ function parseCSV(text){
 function normDate(s){s=(s||"").trim();let m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);if(m){let y=m[3];if(y.length===2)y="20"+y;return y+"-"+m[1].padStart(2,"0")+"-"+m[2].padStart(2,"0");}m=s.match(/^(\d{4})-(\d{2})-(\d{2})/);if(m)return m[1]+"-"+m[2]+"-"+m[3];return null;}
 function incClassify(n){n=(n||"").toLowerCase();return /paycheck|payroll|umbc|direct dep/.test(n)?"earned":/zelle.*from|support|venmo.*from/.test(n)?"support":/atm cash deposit|cash deposit|remote.*deposit|check/.test(n)?"cashin":"refund";}
 function dedupeKey(date,signed,desc){return date+"|"+Math.round(signed*100)+"|"+(desc||"").toUpperCase().replace(/[^A-Z0-9]/g,"").slice(0,12);}
-function importCSV(input){const f=input.files[0];if(!f)return;input.value="";const r=new FileReader();r.onload=()=>{try{parseImport(r.result);}catch(e){toast("Couldn't read that CSV");}};r.readAsText(f);}
-function parseImport(text){
+function importCSV(input){const f=input.files[0];if(!f)return;input.value="";const r=new FileReader();r.onload=()=>{try{parseImport(r.result,f.name);}catch(e){toast("Couldn't read that CSV");}};r.readAsText(f);}
+// Money moving between your own accounts — not spending. Card payments would otherwise double-count
+// (the card purchases are the real spending), and brokerage deposits are savings, not expenses.
+const OWN_TRANSFER_RX=/(discover\s+e-?payment|credit\s*crd|card\s*(auto)?pay|autopay.*card|capital one.*(pymt|payment)|amex\s*e?payment|citi.*(autopay|payment)|payment to chase card|applecard|apple card|robinhood|coinbase|fidelity|vanguard|schwab|webull|acorns|transfer to (sav|chk)|online transfer to)/i;
+function expenseCat(desc,type){
+  if(OWN_TRANSFER_RX.test(desc))return "transfer";
+  if(/atm|zelle payment to|partnerfi/i.test(desc)||/atm|partnerfi/i.test(type||""))return "transfer";
+  return autoCategorize(desc)||"other";
+}
+function parseImport(text,fname){
   const rows=parseCSV(text).filter(r=>r.length>1&&r.some(x=>x.trim()));
   if(rows.length<2){toast("That CSV looks empty");return;}
   const h=rows[0].map(x=>x.toLowerCase().trim());
+  if(isCardCSV(h,fname))return parseCardImport(rows,h,fname||"");
   const find=(...ks)=>h.findIndex(x=>ks.some(k=>x.includes(k)));
   const C={date:find("date"),desc:find("description","name","memo","payee"),amount:find("amount"),debit:find("debit","withdrawal"),credit:find("credit","deposit"),balance:find("balance"),type:find(" type","details")};
   if(C.date<0||(C.amount<0&&C.debit<0&&C.credit<0)){toast("Couldn't find date/amount columns in that CSV");return;}
-  const cnt={};DB.txns.forEach(t=>{const k=dedupeKey(t.date,t.type==="income"?t.amount:-t.amount,t.note);cnt[k]=(cnt[k]||0)+1;});
-  const parsed=[];let dup=0,bal=null,balDate="";
+  const items=[];let bal=null,balDate="";
   for(let i=1;i<rows.length;i++){
     const r=rows[i];const date=normDate(r[C.date]);if(!date)continue;
     let amt;
@@ -1495,24 +1602,136 @@ function parseImport(text){
     if(isNaN(amt)||amt===0)continue;
     const desc=(r[C.desc]||"").trim(),type=C.type>=0?(r[C.type]||""):"";
     if(C.balance>=0){const b=parseFloat((r[C.balance]||"").replace(/[^0-9.\-]/g,""));if(!isNaN(b)&&date>balDate){bal=b;balDate=date;}}
-    const key=dedupeKey(date,amt,desc);
-    if(cnt[key]>0){cnt[key]--;dup++;continue;}
-    let ty,cat;
-    if(amt>0){ty="income";cat=incClassify(desc);}
-    else{ty="expense";cat=/atm|zelle payment to|partnerfi/i.test(desc)||/atm|partnerfi/i.test(type)?"transfer":(autoCategorize(desc)||"other");}
-    parsed.push({date,type:ty,amount:Math.round(Math.abs(amt)*100)/100,cat,note:desc,source:"bank"});
+    items.push({date,amt,desc,type});
   }
-  _pendingImport={txns:parsed,dup,balance:bal};
+  stageImport(items,{balance:bal,balDate});
+}
+/* ---- Credit card CSVs (Discover, Chase card, generic) ---- */
+function isCardCSV(h,fname){
+  return h.includes("trans. date")||/discover|card|amex|capital ?one|citi/i.test(fname||"")&&h.some(x=>x.includes("category"))
+    ||(h.some(x=>x.includes("transaction date"))&&h.some(x=>x.includes("post date"))&&h.some(x=>x.includes("category")));
+}
+const CARD_CAT_MAP=[[/restaurant|dining|food & drink/i,"food"],[/supermarket|grocer/i,"groceries"],[/gas|automotive|travel|transport/i,"transport"],
+  [/entertainment/i,"goingout"],[/merchandise|shopping/i,"shopping"],[/health|medical|pharmac/i,"health"],[/utilit|bills|services|education|fees/i,"bills"]];
+function cleanCardDesc(d){return (d||"").replace(/\s*APPLE PAY ENDING IN.*$/i,"").replace(/\s*GOOGLE PAY ENDING IN.*$/i,"").replace(/\s+/g," ").trim();}
+function cardCatFor(desc,hint){
+  if(/uber\s*\*?\s*(trip|lime)|lyft|charmpass|\blime\b|scooter|mta|parking/i.test(desc))return "transport";
+  if(/gas and electr|bge\b|comcast|verizon|t-mobile|at&t|xfinity/i.test(desc))return "bills";
+  if(/csc serviceworks|laundry|coinmach/i.test(desc))return "other";
+  const a=autoCategorize(desc);
+  // Issuer categories are reliable for these; only let history refine them within sensible bounds
+  if(/merchandise/i.test(hint||""))return ["groceries","bills","health"].includes(a)&&!/badminton|sport/i.test(desc)?a:"shopping";
+  if(/restaurant/i.test(hint||""))return "food";
+  if(/supermarket/i.test(hint||""))return "groceries";
+  if(a&&a!=="transfer")return a;
+  for(const [rx,c] of CARD_CAT_MAP)if(rx.test(hint||""))return c;
+  return "other";
+}
+function parseCardImport(rows,h,fname){
+  const find=(...ks)=>h.findIndex(x=>ks.some(k=>x.includes(k)));
+  const C={post:find("post date","posted"),date:find("trans. date","transaction date","date"),desc:find("description","merchant","name"),amount:find("amount"),cat:find("category"),type:find("type")};
+  if(C.date<0||C.amount<0){toast("Couldn't find date/amount columns in that card CSV");return;}
+  const issuer=/discover/i.test(fname)||h.includes("trans. date")?"Discover":/chase/i.test(fname)?"Chase card":/amex|american express/i.test(fname)?"Amex":/capital/i.test(fname)?"Capital One":"Credit card";
+  // Sign convention: Discover = purchases positive. Chase/Amex-style with a Type column = purchases negative.
+  let vals=rows.slice(1).map(r=>parseFloat((r[C.amount]||"").replace(/[^0-9.\-]/g,""))).filter(v=>!isNaN(v));
+  const purchasesPositive=issuer==="Discover"||(C.type<0&&vals.filter(v=>v>0).length>=vals.filter(v=>v<0).length);
+  const items=[];
+  for(let i=1;i<rows.length;i++){
+    const r=rows[i],date=normDate(r[C.date]);if(!date)continue;
+    let a=parseFloat((r[C.amount]||"").replace(/[^0-9.\-]/g,""));if(isNaN(a)||a===0)continue;
+    if(!purchasesPositive)a=-a;                            // now: + = purchase, − = payment/credit
+    const raw=(r[C.desc]||"").trim(),desc=cleanCardDesc(raw),hint=C.cat>=0?(r[C.cat]||""):"",typ=C.type>=0?(r[C.type]||""):"";
+    const kind=a>0?"purchase":(/payment/i.test(hint)||/payment/i.test(typ)||/payment\s*-?\s*thank|autopay|epay|online payment/i.test(raw))?"payment":"credit";
+    const post=C.post>=0?normDate(r[C.post]):null;
+    items.push({date,post:post||date,amt:Math.abs(a),desc,hint,kind});
+  }
+  const m=fname.match(/(20\d{2})(\d{2})(\d{2})/),stmtClose=m?`${m[1]}-${m[2]}-${m[3]}`:null;
+  const existing=(DB.cards||[]).find(c=>c.name.toLowerCase().startsWith(issuer.toLowerCase().split(" ")[0]));
+  stageCardImport(items,{issuer,stmtClose,cardId:existing?existing.id:(DB.cards&&DB.cards[0]?DB.cards[0].id:"new")});
+}
+function cardItemToTxn(it,cardId){const t=_cardItemToTxn(it,cardId);if(it.post&&it.post!==it.date)t.postDate=it.post;return t;}
+function _cardItemToTxn(it,cardId){
+  const src="card:"+cardId;
+  if(it.kind==="purchase")return {date:it.date,type:"expense",amount:it.amt,cat:cardCatFor(it.desc,it.hint),note:it.desc,source:src};
+  if(it.kind==="payment")return {date:it.date,type:"cardpay",amount:it.amt,cat:"transfer",note:it.desc,source:src};
+  return {date:it.date,type:"income",amount:it.amt,cat:"refund",note:it.desc,source:src};
+}
+const txSigned=t=>(t.type==="expense"?-t.amount:t.amount);
+function stageCardImport(items,meta){
+  const src=meta.cardId==="new"?null:"card:"+meta.cardId;
+  const cnt={};DB.txns.filter(t=>src&&t.source===src).forEach(t=>{const k=dedupeKey(t.date,txSigned(t),t.note);cnt[k]=(cnt[k]||0)+1;});
+  const parsed=[];let dup=0;
+  for(const it of items){
+    const t=cardItemToTxn(it,meta.cardId),k=dedupeKey(t.date,txSigned(t),t.note);
+    if(cnt[k]>0){cnt[k]--;dup++;continue;}
+    parsed.push({t,it});
+  }
+  // Link card payments to the matching bank-side payment (same amount, within 6 days)
+  const bankPays=DB.txns.filter(t=>isBank(t)&&t.type==="expense"&&t.cat==="transfer");
+  let matched=0,unmatched=[];
+  for(const {t} of parsed)if(t.type==="cardpay"){
+    const hit=bankPays.find(b=>Math.abs(b.amount-t.amount)<0.005&&Math.abs(new Date(b.date)-new Date(t.date))/864e5<=6);
+    if(hit)matched++;else unmatched.push(t);
+  }
+  _pendingImport={card:true,txns:parsed.map(p=>p.t),dup,meta,matched,unmatched,_items:items};
+  renderImportPreview();
+}
+function setImportCard(v){if(!_pendingImport||!_pendingImport.card)return;const m=_pendingImport.meta;m.cardId=v==="new"?"new":+v;
+  const items=_pendingImport._items;stageCardImport(items,m);}
+// Shared by CSV + PDF import: dedupe against existing data, categorize, stage for preview.
+function stageImport(items,meta){
+  const cnt={};DB.txns.filter(t=>!isCard(t)).forEach(t=>{const k=dedupeKey(t.date,txSigned(t),t.note);cnt[k]=(cnt[k]||0)+1;});
+  const parsed=[];let dup=0;
+  for(const it of items){
+    const key=dedupeKey(it.date,it.amt,it.desc);
+    if(cnt[key]>0){cnt[key]--;dup++;continue;}
+    const ty=it.amt>0?"income":"expense",cat=it.amt>0?incClassify(it.desc):expenseCat(it.desc,it.type);
+    parsed.push({date:it.date,type:ty,amount:Math.round(Math.abs(it.amt)*100)/100,cat,note:it.desc,source:"bank"});
+  }
+  // Only re-anchor the balance if this file is at least as recent as the bank data we already have
+  const bankDates=DB.txns.filter(isBank).map(t=>t.date).sort();
+  const lastHave=bankDates.length?bankDates[bankDates.length-1]:"";
+  const anchor=meta.balance!=null&&(meta.balDate||"")>=lastHave;
+  // Gap detection: statement starts well after the last bank transaction we have
+  let gap=null;
+  const firstNew=items.length?items.map(i=>i.date).sort()[0]:null,from=meta.periodStart||firstNew;
+  if(lastHave&&from&&(new Date(from+"T00:00")-new Date(lastHave+"T00:00"))/864e5>5)gap={from:lastHave,to:from};
+  _pendingImport={txns:parsed,dup,balance:anchor?meta.balance:null,staleBal:meta.balance!=null&&!anchor,gap,meta};
   renderImportPreview();
 }
 function renderImportPreview(){
   const el=document.getElementById("csvPreview"),p=_pendingImport;if(!el)return;
   if(!p){el.innerHTML="";return;}
-  const n=p.txns.length;
-  if(!n){el.innerHTML=`<div class="advice good">Nothing new — all ${p.dup} transaction${p.dup!==1?"s":""} in that file are already imported. ✅</div>`;_pendingImport=null;return;}
+  const n=p.txns.length,m=p.meta||{};
+  if(p.card)return renderCardPreview(el,p);
+  const head=m.kind==="pdf"?`<div class="advice ${m.reconciled?"good":"bad"}">${m.reconciled?"✅":"⚠️"} Chase statement ${fmtDate(m.periodStart)} – ${fmtDate(m.periodEnd)} · ${m.count} transactions · ${money(m.begin)} → ${money(m.end)}${m.reconciled?" · reconciled to the penny":" · running balance did NOT reconcile — check before importing"}</div>`:"";
+  const gapHtml=p.gap?`<div class="advice warn">Gap: no bank transactions between <b>${fmtDate(p.gap.from)}</b> and <b>${fmtDate(p.gap.to)}</b>. Import that period's statement too, or monthly totals for it will be understated.</div>`:"";
+  if(!n){el.innerHTML=head+`<div class="advice good">Nothing new — all ${p.dup} transaction${p.dup!==1?"s":""} in that file are already imported. ✅</div>`;_pendingImport=null;return;}
+  const tr=p.txns.filter(t=>t.type==="expense"&&t.cat==="transfer"&&OWN_TRANSFER_RX.test(t.note)).reduce((s,t)=>s+t.amount,0);
   const rowHtml=t=>{const ic=t.type==="income"?(incCatMap[t.cat]||incCatMap.refund):(catMap[t.cat]||catMap.other);return `<div class="txn"><div class="ic">${ic.icon}</div><div class="info"><div class="t">${escapeHtml(displayName(t.note))}</div><div class="s">${ic.name} · ${fmtDate(t.date)}</div></div><div class="amt ${t.type==="income"?"income":""}">${t.type==="income"?"+":"-"}${money(t.amount)}</div></div>`;};
-  el.innerHTML=`<div class="hint"><b>${n}</b> new · ${p.dup} duplicate${p.dup!==1?"s":""} skipped${p.balance!=null?` · balance will be set to <b>${money(p.balance)}</b>`:""}</div>
+  el.innerHTML=head+gapHtml+`<div class="hint"><b>${n}</b> new · ${p.dup} duplicate${p.dup!==1?"s":""} skipped${p.balance!=null?` · balance will be set to <b>${money(p.balance)}</b>`:""}${p.staleBal?" · older than your latest data, so your balance won't change":""}</div>
+    ${tr>0?`<div class="hint">🔄 ${money(tr)} of card payments / investing moved to Cash/Transfer so it isn't counted as spending.</div>`:""}
     ${p.txns.slice(0,12).map(rowHtml).join("")}${n>12?`<div class="hint" style="text-align:center;margin-top:6px">…and ${n-12} more</div>`:""}
+    <div class="split" style="margin-top:10px">
+      <button class="btn" style="flex:1" onclick="confirmImport()">Import ${n}</button>
+      <button class="btn ghost" style="flex:1" onclick="cancelImport()">Cancel</button>
+    </div>`;
+}
+function renderCardPreview(el,p){
+  const m=p.meta,cards=DB.cards||[];
+  const sel=`<select onchange="setImportCard(this.value)" style="margin:6px 0">${cards.map(c=>`<option value="${c.id}" ${m.cardId===c.id?"selected":""}>💳 ${escapeHtml(c.name)}</option>`).join("")}<option value="new" ${m.cardId==="new"?"selected":""}>➕ New card: ${escapeHtml(m.issuer)}</option></select>`;
+  const pur=p.txns.filter(t=>t.type==="expense"),pay=p.txns.filter(t=>t.type==="cardpay"),cr=p.txns.filter(t=>t.type==="income");
+  const sum=a=>a.reduce((s,t)=>s+t.amount,0),n=p.txns.length;
+  const dates=p.txns.map(t=>t.date).sort();
+  const head=`<div class="advice good">💳 ${escapeHtml(m.issuer)} CSV${n?` · ${fmtDate(dates[0])} – ${fmtDate(dates[dates.length-1])}`:""}<br>
+    <b>${pur.length}</b> purchases ${money(sum(pur))} · <b>${pay.length}</b> payments ${money(sum(pay))}${cr.length?` · <b>${cr.length}</b> credits ${money(sum(cr))}`:""}</div>
+    <label>Import into</label>${sel}`;
+  if(!n){el.innerHTML=head+`<div class="advice good">Nothing new — all ${p.dup} transaction${p.dup!==1?"s":""} are already imported. ✅</div>`;return;}
+  const payNote=pay.length?`<div class="hint">🔗 ${p.matched} of ${pay.length} payment${pay.length!==1?"s":""} match a bank transfer, so nothing is double-counted${p.unmatched.length?` · ${p.unmatched.length} came from a period with no bank data (${p.unmatched.map(t=>money0(t.amount)+" "+fmtDate(t.date)).slice(0,3).join(", ")})`:""}.</div>`:"";
+  const rowHtml=t=>{const ic=t.type==="cardpay"?CARDPAY_IC:t.type==="income"?incCatMap.refund:(catMap[t.cat]||catMap.other);return `<div class="txn"><div class="ic">${ic.icon}</div><div class="info"><div class="t">${escapeHtml(displayName(t.note))}</div><div class="s">${ic.name} · ${fmtDate(t.date)}</div></div><div class="amt ${t.type!=="expense"?"income":""}">${t.type!=="expense"?"+":"-"}${money(t.amount)}</div></div>`;};
+  const list=p.txns.slice().sort((a,b)=>b.date.localeCompare(a.date));
+  el.innerHTML=head+`<div class="hint"><b>${n}</b> new · ${p.dup} duplicate${p.dup!==1?"s":""} skipped${m.stmtClose?` · statement closing day set to <b>${+m.stmtClose.slice(8)}</b>`:""}</div>${payNote}
+    ${list.slice(0,12).map(rowHtml).join("")}${n>12?`<div class="hint" style="text-align:center;margin-top:6px">…and ${n-12} more</div>`:""}
     <div class="split" style="margin-top:10px">
       <button class="btn" style="flex:1" onclick="confirmImport()">Import ${n}</button>
       <button class="btn ghost" style="flex:1" onclick="cancelImport()">Cancel</button>
@@ -1520,14 +1739,116 @@ function renderImportPreview(){
 }
 function confirmImport(){
   const p=_pendingImport;if(!p||!p.txns.length)return;
+  if(p.card){
+    let c=p.meta.cardId==="new"?null:(DB.cards||[]).find(x=>x.id===p.meta.cardId);
+    if(!c)c=addCard(p.meta.issuer);
+    if(p.meta.stmtClose&&!c.stmtDay)c.stmtDay=+p.meta.stmtClose.slice(8);
+    const base=Date.now();p.txns.forEach((t,i)=>{t.id=base+i;t.source="card:"+c.id;DB.txns.push(t);});
+    _tokCache=null;save();
+    document.getElementById("csvPreview").innerHTML=`<div class="advice good">Imported ${p.txns.length} transaction${p.txns.length>1?"s":""} into ${escapeHtml(c.name)}. ✅</div>`;
+    _pendingImport=null;updateSourceOptions();
+    renderExpenses();renderDash();renderBudget();renderNoteSuggest();toast("Imported "+p.txns.length);return;
+  }
   const base=Date.now();p.txns.forEach((t,i)=>{t.id=base+i;DB.txns.push(t);});
-  if(p.balance!=null)DB.settings.startBal+=(p.balance-bankBalance()); // re-anchor bank balance to CSV's latest posted balance
+  if(p.balance!=null)DB.settings.startBal+=(p.balance-bankBalance()); // re-anchor bank balance to the file's latest balance
   _tokCache=null;save();
   document.getElementById("csvPreview").innerHTML=`<div class="advice good">Imported ${p.txns.length} transaction${p.txns.length>1?"s":""}. ✅</div>`;
   _pendingImport=null;
   renderExpenses();renderDash();renderBudget();renderNoteSuggest();toast("Imported "+p.txns.length);
 }
 function cancelImport(){_pendingImport=null;document.getElementById("csvPreview").innerHTML="";}
+
+/* ===================== PDF STATEMENT IMPORT (Chase checking) ===================== */
+// Group pdf.js text items into visual lines (per page), left-to-right.
+async function pdfToLines(pdf){
+  const out=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p),tc=await page.getTextContent(),rows=[];
+    for(const it of tc.items){
+      if(!it.str||!it.str.trim())continue;
+      const x=it.transform[4],y=it.transform[5];
+      let r=rows.find(r=>Math.abs(r.y-y)<2.5);
+      if(!r){r={y,items:[]};rows.push(r);}
+      r.items.push({x,s:it.str});
+    }
+    rows.sort((a,b)=>b.y-a.y);
+    for(const r of rows)out.push(r.items.sort((a,b)=>a.x-b.x).map(i=>i.s).join(" ").replace(/\s+/g," ").trim());
+  }
+  return out;
+}
+const _MONTHS={january:1,february:2,march:3,april:4,may:5,june:6,july:7,august:8,september:9,october:10,november:11,december:12};
+// Parse Chase checking statement lines → {txns:[{date,amount,desc,balance}], begin, end, period, acct, reconciled}
+function parseChaseStatement(lines){
+  const full=lines.join("\n");
+  const per=full.match(/([A-Z][a-z]+)\s+(\d{1,2}),\s*(\d{4})\s+through\s+([A-Z][a-z]+)\s+(\d{1,2}),\s*(\d{4})/);
+  if(!per)throw new Error("Not a Chase statement (no statement period found)");
+  const sM=_MONTHS[per[1].toLowerCase()],sY=+per[3],eM=_MONTHS[per[4].toLowerCase()],eY=+per[6];
+  const acct=(full.match(/Account Number:\s*0*(\d+)/)||[])[1]||"";
+  const yearFor=m=>(sY!==eY&&m>=sM)?sY:eY; // handles Dec→Jan statements
+  const numRx=/^-?\$?[\d,]+\.\d{2}$/,toNum=s=>parseFloat(s.replace(/[$,]/g,""));
+  const txns=[];let begin=null,end=null,inDetail=false,pendDate=null,cur=null;
+  for(const raw of lines){
+    const ln=raw.trim();
+    if(/TRANSACTION DETAIL/i.test(ln)){inDetail=true;continue;}
+    if(!inDetail)continue;
+    if(/^\*end\*transaction/i.test(ln)||/^\*start\*/i.test(ln)||/^Page \d+ of \d+/i.test(ln)||/through .* \d{4}$/.test(ln)||/^Account Number/i.test(ln)||/^\(continued\)$/i.test(ln)||/^DATE\s+DESCRIPTION/i.test(ln)){cur=null;continue;}
+    if(/^Beginning Balance/i.test(ln)){const t=ln.split(" ").pop();if(numRx.test(t))begin=toNum(t);continue;}
+    if(/^Ending Balance/i.test(ln)){const t=ln.split(" ").pop();if(numRx.test(t))end=toNum(t);inDetail=false;cur=null;continue;}
+    if(/IN CASE OF ERRORS/i.test(ln)){inDetail=false;continue;}
+    const toks=ln.split(" ");
+    let date=null;
+    if(/^\d{2}\/\d{2}$/.test(toks[0])){date=toks.shift();}
+    if(date&&!toks.length){pendDate=date;cur=null;continue;} // date alone on its line (page-break artifact)
+    const n=toks.length;
+    if(n>=3&&numRx.test(toks[n-1])&&numRx.test(toks[n-2])){
+      const d=date||pendDate;pendDate=null;
+      if(!d){cur=null;continue;}
+      const [mm,dd]=d.split("/").map(Number);
+      cur={date:`${yearFor(mm)}-${String(mm).padStart(2,"0")}-${String(dd).padStart(2,"0")}`,amount:toNum(toks[n-2]),balance:toNum(toks[n-1]),desc:toks.slice(0,n-2).join(" ")};
+      txns.push(cur);
+    }else if(cur&&!date){cur.desc+=" "+ln;} // wrapped description line
+  }
+  // strip Chase reference noise from descriptions
+  for(const t of txns){
+    t.desc=t.desc.replace(/\s+(Web ID|Transaction#|Reference#|Ref|Info|Iid|Recd|Trn|Bref)\s*:.*$/i,"")
+      .replace(/^(\d{2}\/\d{2}\s+)/,"").replace(/\s+/g," ").trim();
+  }
+  // reconcile: beginning balance + every amount must hit each printed running balance
+  let run=begin,ok=begin!=null,firstBad=null;
+  for(const t of txns){run=Math.round((run+t.amount)*100)/100;if(Math.abs(run-t.balance)>0.005&&!firstBad){ok=false;firstBad=t;}}
+  if(end!=null&&Math.abs(run-end)>0.005)ok=false;
+  return {txns,begin,end,acct,period:{start:`${sY}-${String(sM).padStart(2,"0")}-${per[2].padStart(2,"0")}`,end:`${eY}-${String(eM).padStart(2,"0")}-${per[5].padStart(2,"0")}`},reconciled:ok,firstBad};
+}
+// Clean a statement description into the merchant form used elsewhere in the app
+function cleanStmtDesc(d){
+  return d.replace(/^(Recurring\s+)?Card Purchase(\s+With Pin)?\s+\d{2}\/\d{2}\s+/i,"")
+    .replace(/\s+Card\s+\d{4}$/i,"")
+    .replace(/^(Zelle Payment (?:From|To) .+?)\s+(?=\S*\d)\S+$/i,"$1") // drop Zelle reference code
+    .replace(/^Real Time Transfer Recd From .*?From:\s*/i,"Transfer From ")
+    .replace(/^\d{2}\/\d{2}\s+Online Realtime Payment To /i,"Online Payment To ")
+    .replace(/\s+/g," ").trim();
+}
+let _pdfjs=null;
+function loadPdfJs(){
+  if(_pdfjs)return _pdfjs;
+  const V="3.11.174",B=`https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${V}/`;
+  _pdfjs=new Promise((res,rej)=>{const sc=document.createElement("script");sc.src=B+"pdf.min.js";
+    sc.onload=()=>{window.pdfjsLib.GlobalWorkerOptions.workerSrc=B+"pdf.worker.min.js";res(window.pdfjsLib);};
+    sc.onerror=()=>{_pdfjs=null;rej(new Error("Couldn't load the PDF reader — are you online?"));};document.head.appendChild(sc);});
+  return _pdfjs;
+}
+async function importPDF(input){
+  const f=input.files[0];if(!f)return;input.value="";
+  const el=document.getElementById("csvPreview");el.innerHTML=`<div class="hint">Reading ${escapeHtml(f.name)}…</div>`;
+  try{
+    const lib=await loadPdfJs();
+    const pdf=await lib.getDocument({data:new Uint8Array(await f.arrayBuffer())}).promise;
+    const st=parseChaseStatement(await pdfToLines(pdf));
+    if(!st.txns.length)throw new Error("No transactions found in that statement");
+    const items=st.txns.map(t=>({date:t.date,amt:t.amount,desc:cleanStmtDesc(t.desc),type:""}));
+    stageImport(items,{kind:"pdf",balance:st.end,balDate:st.period.end,periodStart:st.period.start,periodEnd:st.period.end,begin:st.begin,end:st.end,count:st.txns.length,reconciled:st.reconciled});
+  }catch(e){el.innerHTML=`<div class="advice bad">${escapeHtml(e.message||"Couldn't read that PDF")}. Only Chase checking statements are supported right now.</div>`;}
+}
 
 /* ===================== NAV + INIT ===================== */
 function go(v){
@@ -1569,6 +1890,10 @@ function migrate(){
     DB.txns.forEach(t=>{if(t.type==="expense"&&t.cat==="other"&&rx.test(t.note||""))t.cat="transfer";});
     DB._mig_transfer=true;
   }
+  if(!DB._mig_owntransfer){
+    DB.txns.forEach(t=>{if(t.type==="expense"&&t.cat!=="transfer"&&OWN_TRANSFER_RX.test(t.note||""))t.cat="transfer";});
+    DB._mig_owntransfer=true;
+  }
   if(!DB._mig_income){
     DB.txns.filter(t=>t.type==="income").forEach(t=>{
       const n=(t.note||"").toLowerCase();
@@ -1588,7 +1913,7 @@ function updateCatOptions(){
 }
 function initUI(){
   migrate();
-  updateCatOptions();
+  updateCatOptions();updateSourceOptions();
   document.getElementById("eDate").value=todayStr();
   document.getElementById("stDate").value=todayStr();
   document.getElementById("dateSub").textContent=new Date().toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric",year:"numeric"});

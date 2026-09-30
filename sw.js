@@ -1,6 +1,6 @@
 // MoneyMate service worker — network-first for the app so updates always load online,
 // with a cache fallback so it still works offline.
-const CACHE = 'moneymate-v1';
+const CACHE = 'moneymate-v2';
 const ASSETS = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
